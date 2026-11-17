@@ -117,3 +117,94 @@ class SetupTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(runner.run(),5)
             self.assertEqual(len(calls),2)
             runner.state.db.close()
+
+@unittest.skipUnless(HAS_LIBRARY,'install requirements.txt for TCP integration test')
+class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
+    async def test_channels_dms_receipts_and_flood_on_real_wire(self):
+        import hashlib
+        keys=[bytes.fromhex('11'*32),bytes.fromhex('22'*32)]
+        ts=int(time.time())
+        # All inputs arrive before the first DM receipt times out.
+        pending=[('channel',1,'Brad: ping'),('channel',2,'Brad: ping'),
+                 ('channel',2,'Brad: @[infobot] ping'),
+                 ('dm',keys[0],'ping'),('dm',keys[1],'ping')]
+        sent=[];resets=[];connections=[];completed=asyncio.Event()
+        def check():
+            channels=[x for x in sent if x[0]=='channel']
+            a=[x for x in sent if x[0]=='dm' and x[1]==keys[0][:6]]
+            b=[x for x in sent if x[0]=='dm' and x[1]==keys[1][:6]]
+            if len(channels)==2 and len(a)>=2 and b:completed.set()
+        async def peer(reader,writer):
+            connections.append(writer)
+            async def frame(body):
+                writer.write(b'>'+len(body).to_bytes(2,'little')+body);await writer.drain()
+            try:
+                while True:
+                    header=await reader.readexactly(3)
+                    body=await reader.readexactly(int.from_bytes(header[1:],'little'))
+                    cmd=body[0]
+                    if cmd==1:
+                        await frame(b'\x05'+bytes([1,20,22])+bytes(32)+bytes(8)+bytes(4)+bytes(8)+bytes([8,5])+b'infobot')
+                    elif cmd==22:
+                        await frame(b'\x0d'+bytes([10,1,3])+bytes(4)+b'test'.ljust(12,b'\0')+b'emulator'.ljust(40,b'\0')+b'1.0'.ljust(20,b'\0')+bytes([0,1]))
+                    elif cmd==31:
+                        idx=body[1];name=['Public','#infobot','#other'][idx]
+                        key=hashlib.sha256(name.encode()).digest()[:16] if idx else bytes(16)
+                        await frame(bytes([18,idx])+name.encode().ljust(32,b'\0')+key)
+                    elif cmd==4:
+                        await frame(b'\x02'+(2).to_bytes(4,'little'))
+                        for key in keys:
+                            await frame(b'\x03'+key+bytes([1,0,65])+b'\xaa\xbb'.ljust(64,b'\0')+
+                                        b'User'.ljust(32,b'\0')+ts.to_bytes(4,'little')+
+                                        (43900000).to_bytes(4,'little',signed=True)+(-83100000).to_bytes(4,'little',signed=True)+ts.to_bytes(4,'little'))
+                        await frame(b'\x04'+ts.to_bytes(4,'little'))
+                    elif cmd==10:
+                        if pending:
+                            kind,target,text=pending.pop(0)
+                            if kind=='channel':
+                                await frame(bytes([17,20,0,0,target,64,0])+ts.to_bytes(4,'little')+text.encode())
+                            else:
+                                await frame(bytes([16,20,0,0])+target[:6]+bytes([255,0])+ts.to_bytes(4,'little')+text.encode())
+                            await frame(b'\x83')
+                        else:await frame(b'\x0a')
+                    elif cmd==3:
+                        sent.append(('channel',body[2],body[7:].decode()))
+                        await frame(b'\0');check()
+                    elif cmd==2:
+                        key=body[7:13];attempt=body[2];text=body[13:].decode()
+                        sent.append(('dm',key,attempt,text,body[3:7]))
+                        code=len(sent).to_bytes(4,'little')
+                        await frame(b'\x06'+bytes([int(attempt>0)])+code+(10).to_bytes(4,'little'))
+                        if key!=keys[0][:6] or attempt>0:
+                            await frame(b'\x82'+code+(5).to_bytes(4,'little'))
+                        check()
+                    elif cmd==13:
+                        resets.append(body[1:]);await frame(b'\0')
+                    elif cmd==20:await frame(b'\x0c'+(4000).to_bytes(2,'little'))
+                    else:await frame(b'\0')
+            except (asyncio.IncompleteReadError,ConnectionError):pass
+            finally:writer.close()
+        server=await asyncio.start_server(peer,'127.0.0.1',0)
+        port=server.sockets[0].getsockname()[1]
+        with tempfile.TemporaryDirectory() as d,patch.dict(os.environ,{'MESH_HOST':'127.0.0.1','MESH_PORT':str(port)}):
+            runner=Runner(Config(state=d+'/s.db',gap=.01,channels=(('#infobot','bare'),('#other','mention')),
+                                 dm_ack_timeout=.5,dm_flood_after=1,dm_retries=2))
+            task=asyncio.create_task(runner.session())
+            try:
+                await asyncio.wait_for(completed.wait(),15)
+                await asyncio.sleep(.1)
+                self.assertCountEqual([x[1:] for x in sent if x[0]=='channel'],[(1,'Pong!'),(2,'Pong!')])
+                a=[x for x in sent if x[0]=='dm' and x[1]==keys[0][:6]]
+                self.assertEqual([x[2] for x in a],[0,1])
+                self.assertEqual(a[0][4],a[1][4])
+                self.assertEqual(resets,[keys[0]])
+                b=next(x for x in sent if x[0]=='dm' and x[1]==keys[1][:6])
+                self.assertLess(sent.index(b),sent.index(a[1]))
+            finally:
+                runner.stop.set()
+                try:await asyncio.wait_for(task,3)
+                except asyncio.TimeoutError:task.cancel()
+                with suppress(asyncio.CancelledError):await task
+                runner.state.db.close()
+                server.close();await server.wait_closed()
+                for writer in connections:writer.close()

@@ -6,6 +6,6 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir /state && chown 1000:1000 /state
-COPY core.py bot.py internet_features.py dtx_counties.json ./
+COPY --chmod=644 core.py bot.py delivery.py command_worker.py internet_features.py dtx_counties.json ./
 USER 1000:1000
 CMD ["python", "bot.py"]

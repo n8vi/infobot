@@ -1,219 +1,234 @@
-# infobot — stage 2 / v0.5.3
+# infobot — v0.6.0
 
-A from-scratch MeshCore bot for tarratt.net infrastructure. It connects by TCP
-to the companion at `10.0.0.10:5051`, identifies as `infobot`, and listens only
-on `#infobot`. Scanner and transcript commands remain reserved for a later
-stage. The separate GOES API project serves local EMWIN weather and received
-weather maps at `10.0.0.10:8097`.
+A MeshCore companion bot for tarratt.net. The bot connects over TCP, serves
+configured hashtag channels and private messages, and replies with local GOES
+weather, aircraft, vessel and route information. Satellite predictions run
+locally using cached CelesTrak elements. No LLM or online weather fallback is
+used. Scanner/transcript integration and active weather warnings are not implemented.
 
-## Deploy
+## Upgrade and deploy
 
-Update the GOES API first because this release adds the full Detroit/Pontiac
-forecast area. Extract the corresponding API release into `~/infobot-goes`:
-
-```bash
-cd ~/infobot-goes
-docker compose build goes-api
-docker compose up -d --no-build --pull never goes-api
-```
-
-Then extract this archive into `~/infobot`:
+This repository contains both services. Run Compose from this directory;
+there is no separate Compose project inside `infobot-goes/`.
+Existing `.env` files work without edits: all existing keys retain their
+meaning. Missing new keys use the defaults described below. Version 0.6.0
+adds DMs by default; set `DM_ENABLED=false` to disable them. No additional
+channels are enabled automatically.
 
 ```bash
-cd ~/infobot
-cp .env.example .env
-# Adjust AIS_URL / ADSB_URL if your local service addresses differ.
+cp .env.example .env  # first installation only; retain an existing .env on upgrade
+# Adjust source addresses and GOES_ROOT to match your host.
+docker compose config --quiet
 docker compose build
+docker compose up -d --no-build --pull never infobot-goes
 docker compose run --rm infobot python bot.py --check-sources
 ```
 
-The source check does not open the radio connection or transmit. It uses a
-synthetic Huron County repeater location to exercise the local GOES, ADS-B and
-AIS sources. Defaults are:
+Defaults are TCP `10.0.0.10:5051`, GOES `http://10.0.0.10:8097`, AIS
+`http://10.0.0.10:8100/api/ships_full.json`, and ADS-B
+`http://hinton/tar1090/data/aircraft.json`. The existing example `.env` uses
+`http://44.31.120.1/tar1090/data/aircraft.json` for ADS-B; both addresses must
+resolve/route to your local infrastructure.
 
-- `GOES_URL=http://10.0.0.10:8097`
-- `AIS_URL=http://10.0.0.10:8100/api/ships_full.json`
-- `ADSB_URL=http://44.31.120.1/tar1090/data/aircraft.json` (Hinton)
-
-The ADS-B endpoint must return readsb/tar1090 JSON with `now` and an
-`aircraft` list. AIS expects `ships` as a list of objects with `last_signal`
-in seconds. No remote tracking feed is used.
-
-Stop the old meshcore-bot service before connecting this bot; only one program
-should own the companion TCP stream. Keep the GOES API running. Then inspect
-and configure the companion:
+Only one program may own the companion TCP connection. Stop the old bot
+before running radio diagnostics or starting this service:
 
 ```bash
 docker compose run --rm infobot python bot.py --inspect-radio
 docker compose run --rm infobot python bot.py --setup-radio
-docker compose up -d --no-build --pull never
+docker compose up -d --no-build --pull never infobot
 docker compose logs -f --tail=50
 ```
 
-One-time setup names the companion `infobot`, creates `#infobot` in an empty
-non-Public slot if needed, enables two-byte path hashes, and sets default flood
-scope to `mi`. It refuses duplicate channels or a nonstandard channel key. It
-does not change RF settings, existing channel keys, or contacts. Normal startup
-checks the name, channel and path width without rewriting settings.
+Setup creates configured hashtag channels in empty non-Public slots, names
+the companion `infobot`, selects two-byte path hashes, and sets flood scope
+`mi`. It refuses duplicate channels and nonstandard hashtag keys. It leaves
+RF settings and existing channel keys unchanged. Normal startup validates
+settings rather than rewriting them. Channel count is limited by companion
+slots. DM delivery may reset an individual contact route to flood after missed
+receipts; it does not clear the contact list.
+
+## Channels, mentions and DMs
+
+The default is `BOT_CHANNELS='#infobot=bare'`. Configure only channels where
+the bot should respond. Quote this dotenv value because it starts with `#`:
+
+```dotenv
+BOT_CHANNELS='#infobot=bare,#weather=mention,#tools=either,#commands=bang'
+DM_ENABLED=true
+```
+
+| Policy | Activation |
+|---|---|
+| `bare` | `wx`, `!wx`, `@[infobot] wx`; legacy `infobot: wx` also works |
+| `bang` | `!wx` |
+| `mention` | `@[infobot] wx` or `@[infobot]: wx` |
+| `either` | `!wx` or `@[infobot] wx` |
+
+Mentions use the literal MeshCore client syntax **`@[infobot]`**, including
+brackets, case-insensitively. Unconfigured channels are ignored. Only standard
+hashtag channels are supported; custom private channel keys are not configured
+through this interface.
+
+DMs accept bare commands and reply privately. The sender's six-byte prefix
+must uniquely resolve to a full public key in companion contacts/pending
+contacts; ambiguous or unknown senders are ignored. Only ordinary text DMs
+are processed, not CLI/signed-room messages. DMs use their public key as identity;
+channel display names are unauthenticated and can be impersonated.
+
+Each channel has one sequential request queue, and each DM sender has another.
+A reply batch finishes before the next request in that conversation. Other
+conversations can make progress, including while one DM awaits a receipt or
+one command waits on a data source. The shared radio serializes actual send
+commands; packet order is preserved within each conversation.
+
+## Private delivery and radio pacing
+
+Channel replies are sent once, without delivery confirmation. `TX_GAP`
+(default six seconds) is the minimum gap between **channel** transmissions.
+DMs are exempt from that artificial gap: the next DM packet is eligible as
+soon as the destination acknowledges the previous one. All companion command/
+response pairs are serialized, including background message fetching.
+
+DM settings (all optional):
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `DM_ACK_TIMEOUT` | `0` | Seconds per attempt; 0 uses 1.2× companion suggestion, bounded to 5–300 seconds |
+| `DM_RETRIES` | `3` | Retransmissions after the initial send; allowed 0–3 (attempt field 0–3) |
+| `DM_FLOOD_AFTER` | `2` | Reset this destination to flood before attempt index 2, after two unanswered sends |
+
+Retries retain the text and original timestamp and increment the protocol
+attempt field. A matching late receipt from an earlier attempt is accepted;
+unrelated receipts are ignored. The bot subscribes before sending so an early
+receipt cannot be missed. A missing receipt can still mean the message arrived
+and its receipt was lost; duplicate delivery remains possible.
+
+Known routes are tried first. Flood fallback uses the companion's route reset;
+route updates are refreshed after a confirmed delivery for subsequent packets.
+If no receipt arrives within the retry budget, the batch stops at the failed
+packet. `more` retries the failed packet and remaining batch before advancing
+to later saved text. A new content command replaces that saved response.
+A companion send error triggers reconnect rather than blind retries.
 
 ## Commands
 
 | Command | Behavior |
 |---|---|
-| `about` | Version and tarratt.net HQ attribution |
-| `help [command]` | Command list or command-specific help |
+| `about`, `help [command]` | Version, command list and help |
 | `ping` | `Pong!` |
-| `ping <IPv4\|IPv6\|hostname>` | Three bounded ICMP probes; reports packet loss and latency |
-| `path` | One cleaned, numbered hop per line for the received route |
-| `path aabb,ccdd` | Decode supplied hop hashes using local contacts |
-| `hashsize` / `region` | One-line path-hash size and packet region tag |
-| `wx [county]` | Today/tomorrow for the containing supported county; also a different nearest-center county within 50 mi. Outside coverage, nearest forecast only within 50 mi |
-| `aurora` / `spacewx` | GOES Forecast Discussion (`DAYDIS`) forecast text |
-| `sat [NORAD ID\|name[,name...]]` | Satellites overhead/rising soon, or next pass for selected satellites |
-| `adsb` / `planes` | Fresh positioned aircraft from Hinton, nearest-first |
-| `ais` / `boats` | Recently heard vessels from tarratt.net, nearest-first |
-| `internet` | Check DNS reachability to several DNS root servers |
-| `get <HTTP(S) URL>` | Return unformatted fetched text only when it fits one packet |
-| `status` | Bot uptime, GOES state and local-source request status |
-| `more` | Continue the last paginated response |
-| `repeat <page>` | Resend a page without advancing the `more` cursor |
+| `ping <IP or hostname>` | Three bounded ICMP probes |
+| `path [hex]` | Numbered repeater hops, resolving local contacts; aliases `decode`, `route`, `p` |
+| `hashsize`, `region` | Path hash width and region tag |
+| `wx [county]` | Today/tomorrow forecasts; explicit county works without requester location |
+| `aurora`, `spacewx` | Fresh GOES DAYDIS forecast wording, without retrospective summaries |
+| `sat [NORAD ID or name[,name...]]` | Complete current/next amateur satellite passes |
+| `adsb`, `planes` | Fresh airborne aircraft, nearest first |
+| `ais`, `boats` | Recently heard vessels, nearest first |
+| `internet` | DNS reachability probes to root servers |
+| `get <HTTP(S) URL>` | Public fetched text, only if it fits one packet |
+| `status` | Uptime, GOES index health and conversation's source-request status |
+| `more` | Next saved reply batch; on failed DM delivery resumes the failed packet |
+| `repeat N` | Resend packet N of the **latest batch**, without advancing `more` |
 
-`path` also accepts `decode`, `route`, and `p`. Hop names are resolved from
-local contacts; unknown hashes and collisions are marked instead of guessed.
-`wx` accepts any of the 17 county slugs: Midland, Bay, Huron, Saginaw,
-Tuscola, Sanilac, Shiawassee, Genesee, Lapeer, St. Clair (`stclair`),
-Livingston, Oakland, Macomb, Washtenaw, Wayne, Lenawee, and Monroe. A new
-command replaces that sender's saved pagination. Prefix `!` is optional.
+Replies default to 130 UTF-8 bytes, at most three packets per command.
+Numbering restarts within each batch; `repeat` behavior is unchanged.
+Saved text expires ten minutes after creation. Pagination and cooldowns are
+scoped to channel+sender or to the DM public key, so another conversation
+does not overwrite your response. A new content command replaces saved text.
 
-## Per-request location
+Packets older than 120 seconds or over 30 seconds in the future are ignored.
+Keep host and companion clocks synchronized. Duplicate fingerprints persist
+24 hours in the state volume; cooldowns and pagination are in memory.
 
-For `wx`, `sat`, `adsb`, and `ais`, the bot resolves hop 1 from the incoming
-flood packet path against local repeater contacts and uses that repeater's
-advertised latitude and longitude. Direct-route packets, and any packet with
-no captured hop path, use Pinnebog as the reference location: the bot prefers
-its advertised coordinates in local contacts, then falls back to Pinnebog's
-fixed coordinates. A captured hop with a missing, ambiguous, or
-coordinate-free contact still returns a clear location-unavailable response.
-No user location database or internet geolocation is involved.
+## Locations and freshness
 
-Weather county matching is a local estimate using county-center distances
-inside an approximate DTX coverage envelope, not official county polygon
-boundaries. The home county is shown first when it falls in the coverage
-estimate; otherwise all 17 DTX counties are ordered by distance from hop 1.
-The API may not have a forecast section for every county in every received
-bulletin, and the bot reports missing sections. Full forecasts paginate as
-needed. For a single forecast use `wx huron` or another county slug.
-The API must have scanned within ten minutes, and the county forecast is
-accepted for up to 24 hours from its issue time; each reply shows that time.
+For location-dependent commands, captured flood paths resolve hop 1 against
+local repeater contacts. Unknown/colliding hashes and missing coordinates are
+reported. Radio logs must match message identity; timestamp proximity alone
+is insufficient. Pathless/direct requests use advertised Pinnebog coordinates
+when unambiguous, otherwise the bundled Pinnebog point. Private companion
+messages supply hop count but no correlated raw hop hashes, so DMs use that
+same pathless fallback. No internet geolocation is used.
 
-Satellite passes are calculated locally from cached TLEs. The bot refreshes
-TLEs from CelesTrak only as needed (default cache interval 12 hours); if a
-refresh fails, it can continue with a stale cache. Repeater elevation defaults
-to `SAT_ALT_M` (200 m) where no elevation is available.
+Weather uses bundled land-only Census TIGER/Line 2024 county polygons for the
+17 Detroit/Pontiac counties: Midland, Bay, Huron, Saginaw, Tuscola, Sanilac,
+Shiawassee, Genesee, Lapeer, St. Clair (`stclair`), Livingston, Oakland,
+Macomb, Washtenaw, Wayne, Lenawee, Monroe. The containing county is first;
+a different nearest-center county is added if its center is within 50 miles.
+Outside/border/water points use the nearest center only when a supported
+county boundary is within 50 miles. Missing bulletin sections are reported.
+GOES scans must be within ten minutes; county forecasts may be up to 24 hours
+old. Space-weather discussions may be up to 18 hours old. Both reject index
+errors and issue times over five minutes in the future.
 
-ADS-B reads the current local aircraft list, filters receiver and position age
-(default 60 seconds), excludes aircraft on the ground and without coordinates,
-and sorts by distance from hop 1. There is no history/radius filter. AIS reads
-the locally received ships list without response caching, filters last-signal
-age (default 30 minutes), and sorts by current listed position; records without
-coordinates appear last. Heard time is not necessarily position time.
+Satellite passes show rise direction, full-pass maximum elevation, and set
+direction, plus rise/set times in Eastern time. Directions use the 16-point
+true-north compass. The default lists passes up now or rising within an hour,
+but calculates each through setting, including peaks outside that hour.
+Underway passes include the original rise and full peak; a 48-hour search
+limit is stated when a boundary cannot be found. `SAT_ALT_M` defaults to 200m.
+Elements refresh at `SAT_TLE_REFRESH_HOURS` (12h); failed refreshes can use the
+cache, with a warning when elements are over three days old.
 
-## Internet use and container permissions
+ADS-B expects readsb/tar1090 `now` and `aircraft[]`, filters receiver/position
+age (default 60s), excludes ground/unpositioned records, and has no radius
+filter. AIS expects object records in `ships[]`, with `last_signal` age in
+seconds (default 30 minutes). AIS heard time is not necessarily position time;
+missing coordinates sort last. AIS is fetched without response caching.
 
-Normal source HTTP requests are restricted to LAN/loopback addresses, with
-five-second timeouts, a 5 MB response cap, redirects disabled, and environment
-proxies disabled. GOES, AIS, ADS-B, radio, and contact data use local
-infrastructure only.
+## Limits, diagnostics and health
 
-The intentional network exceptions are `internet`, `get`, `sat` TLE refresh,
-and `ping <target>`. `internet` sends DNS queries to several root-server IPs.
-`get` fetches a user-supplied public HTTP(S) URL and returns it only when the
-response fits one packet. `sat` may refresh TLEs from CelesTrak; orbit
-calculations run locally. `ping <target>` resolves a hostname if needed and
-sends at most three ICMP probes with a bounded timeout. It can reach any target
-routable from the container, including LAN targets.
+Optional limits: `COMMAND_TIMEOUT=45` seconds, `COMMAND_WORKERS=4`,
+`CONVERSATION_LIMIT=32`, `QUEUE_LIMIT=8` waiting requests per conversation,
+and `GLOBAL_QUEUE_LIMIT=64` waiting requests overall. Queued requests expire
+at 90 seconds. At capacity, new requests are dropped. Idle conversation workers
+can be evicted; saved pagination remains available until expiry.
 
-The Compose service drops all Linux capabilities, then grants only `NET_RAW`
-for ICMP. `iputils-ping` is installed in the image. This is a container
-capability, not an application-level destination firewall. Docker build needs
-the base image and Python packages; runtime dependencies above are the only
-intentional Internet-using bot features. `--preview 'ping <target>'` is refused
-to avoid sending probes from a diagnostic command.
-
-## Reply handling
-
-- Reply bodies are limited to 130 UTF-8 bytes by default, leaving protocol room.
-- Up to three parts are sent per command, with a six-second minimum gap.
-- One bounded queue holds up to eight commands; queued work expires after
-  90 seconds. A single worker sends replies.
-- Sender packets older than two minutes or more than 30 seconds in the future
-  are ignored. Keep radio and host clocks synchronized.
-- User cooldown defaults to 15 seconds; fingerprints are kept for 24 hours in
-  the Docker state volume. Names on MeshCore channels are not authenticated.
-- Pagination lasts ten minutes. `repeat N` repeats a previously sent page and
-  leaves the `more` cursor unchanged.
-- Only `#infobot` is processed; Public, other channels and DMs are ignored.
-
-## Offline APIs and web maps
-
-The GOES API reads local SatDump EMWIN text, serves JSON, and indexes available
-received weather maps without outbound requests. API routes, map gallery,
-reverse-proxy example, and the 17-county forecast contract are documented in
-the GOES API README. The map gallery is available at
-`http://10.0.0.10:8097/maps.html` on the LAN.
-
-The bot does not use online weather fallbacks, an online LLM, cloud telemetry,
-external flight lookups, or online location lookup. There is no scanner or
-transcript integration in this release.
-
-## Local diagnostics
+Each source command runs in a spawned process; small local commands such as
+`ping` without a target and `help` execute directly. Its deadline includes waiting
+for an execution slot; timed-out or cancelled work is terminated and reaped.
+This bounds DNS, HTTP and orbit computation as well as the async wait.
 
 ```bash
-# Check local feeds without connecting to the radio or transmitting
-docker compose run --rm infobot python bot.py --check-sources
-# Format a command response with a synthetic Huron County location
-docker compose run --rm infobot python bot.py --preview 'wx huron'
+python -B run_tests.py                 # both suites, including emulated radio
+python bot.py --preview 'wx huron'     # no radio connection
+python bot.py --check-sources          # structured source schema/freshness checks
 ```
 
-No Docker build, physical radio session, or live AIS/ADS-B validation was
-performed for this release. The source check above is available for deployment.
+Preview and source diagnostics may access the network; `ping <target>` preview
+is refused. They do not transmit on MeshCore. The bot's `/state/health.json`
+reports radio connection, worker state, and last command error. Its Docker
+health check requires recent radio/worker health. GOES `/healthz` requires a
+completed recent index with products, no index error, and a recent healthy map
+scan; `/v1/status` remains a diagnostic endpoint returning HTTP 200.
+Docker does not restart a container merely because it is unhealthy.
 
-## Rollback and offline image transfer
+## Network and containers
 
-Do not run both bots against the same companion. For an offline host, build on
-a compatible Linux architecture and transfer both Docker images and projects:
+Normal GOES/AIS/ADS-B sources allow LAN/loopback and local AMPRNet
+`44.31.120.0/24` only. Validated DNS addresses are pinned for HTTP connections;
+redirects and environment proxies are disabled, with a 5MB response cap.
+`internet`, `get`, satellite element refresh, and targeted `ping` intentionally
+use the network. `get` pins validated public addresses and rejects private/local
+AMPRNet destinations. `ping` may reach any routable target, including LAN.
+
+Containers run without root, with read-only filesystems. Docker builds set
+application files readable explicitly, independent of checkout permissions. The bot receives
+`NET_RAW` for ICMP; this is not a destination firewall. Runtime state is in the
+`state` volume. Builds need the base images, apt and Python packages.
+The GOES service reads SatDump data read-only and makes no outbound requests.
+See [the GOES README](infobot-goes/README.md) for API and map details.
+
+For offline transfer, build both images on a compatible Linux architecture:
 
 ```bash
-docker save infobot:0.5.3 -o infobot-image.tar
-# destination:
-docker load -i infobot-image.tar
+docker save infobot:0.6.0 infobot-goes:0.3.1 -o infobot-images.tar
+# On the destination, with this repository and its .env:
+docker load -i infobot-images.tar
 docker compose up -d --no-build --pull never
 ```
 
-To roll back, stop infobot, restore prior radio settings if needed, and restart
-the old bot. The state volume is retained.
-
-## Release notes
-
-Version 0.5.7: `wx` uses bundled county boundaries to select the repeater's actual
-county and an optional nearby county-center forecast, with a 50-mile coverage cutoff.
-The bundled land-only county outlines and internal points are from U.S. Census Bureau TIGER/Line 2024;
-area-water polygons are removed so water locations use the nearest-center fallback.
-Version 0.5.6: `aurora` / `spacewx` returns the GOES `DAYDIS` forecast discussion,
-keeping NOAA's forecast wording and omitting the 24-hour summaries and assistant-added commentary.
-Version 0.5.5: `aurora` / `spacewx` condenses the GOES daily indices bulletin
-into a short solar and geomagnetic data line.
-Version 0.5.4: `aurora` / `spacewx` prints the newest GOES-received bulletin
-verbatim, without extracting or interpreting K-index or Bz statements.
-Version 0.5.3: accepts DTX county forecasts up to 24 hours old (with issue time
-shown), replacing the overly strict 18-hour cutoff.
-Version 0.5.2: requests with no captured hop path also use Pinnebog, even when
-the packet metadata labels the route as flood.
-Version 0.5.1: direct-route requests use Pinnebog as their location, preferring
-its local advertised coordinates and using a fixed fallback point otherwise.
-Version 0.5.0: resolves per-request hop-1 repeater location for weather,
-satellite passes, ADS-B and AIS; adds all 17 Detroit/Pontiac counties,
-nearest-first aircraft and vessel ordering, and bounded ICMP ping with Docker
-`NET_RAW` capability. Updates the GOES API to version 0.3.0 for the expanded
-county list.
-# infobot
+Stop infobot before restoring another bot to the companion. Retain the state
+volume. Physical-radio timing, RF route recovery, live feeds, and the host's
+SatDump archive still require deployment validation.

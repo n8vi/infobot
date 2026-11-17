@@ -266,6 +266,11 @@ class Index:
             records, status = copy.deepcopy(self.records), dict(self.status)
         common = {'generated_at': iso(now), 'timezone': 'America/Detroit',
                   'index_error': status['error'], 'last_scan_at': status['last_scan_at']}
+        if path == '/healthz':
+            scanned = status.get('last_scan_at')
+            age = (now-datetime.fromisoformat(scanned)).total_seconds() if scanned else float('inf')
+            healthy = bool(status.get('ready') and not status.get('error') and records and 0 <= age < 600)
+            return (200 if healthy else 503), dict(common, healthy=healthy, ready=status.get('ready'))
         if path in ('/', '/v1/status'):
             return 200, dict(common, **{k: v for k, v in status.items() if k not in common},
                              products={k: {'issued_at': r['issued_at'], 'filename': r['filename']} for k, r in records.items()},
@@ -362,6 +367,14 @@ def serve(index, host, port, maps=None, cors="*"):
                 code, data = 200, maps.catalog(parse_qs(url.query))
             else:
                 code, data = index.respond(url.path, parse_qs(url.query))
+            if maps and url.path == '/healthz':
+                with maps.lock: map_status = dict(maps.status)
+                scanned = map_status.get('last_scan_at')
+                fresh = scanned and 0 <= (datetime.now(UTC)-datetime.fromisoformat(scanned)).total_seconds() < 600
+                if not map_status.get('ready') or map_status.get('error') or not fresh:
+                    code = 503
+                    data['healthy'] = False
+                data['maps'] = map_status
             if maps and url.path in ('/', '/v1/status'):
                 with maps.lock: data['maps'] = dict(maps.status)
                 data['endpoints'] += ['/v1/maps', '/maps.html']

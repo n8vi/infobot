@@ -1,0 +1,26 @@
+name: Tests
+on: [push, pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -B run_tests.py
+      - run: docker compose config --quiet
+      - run: docker build -t infobot:test .
+      - run: docker build -t infobot-goes:test infobot-goes
+      - name: Smoke test bot as its non-root container user
+        run: >-
+          docker run --rm --network none --read-only --cap-drop ALL
+          --entrypoint python infobot:test -c
+          'import asyncio; from core import Config,Engine; from command_worker import execute_bounded; assert asyncio.run(execute_bounded(Engine(Config()),"ping",[],{},{},10,asyncio.Semaphore(1)))=="Pong!"'
+      - name: Smoke test GOES as its non-root container user
+        run: >-
+          docker run --rm --network none --read-only --cap-drop ALL
+          --entrypoint python infobot-goes:test -c
+          'from goes_api import Index; assert Index("/missing").respond("/healthz",{})[0]==503'
