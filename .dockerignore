@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!requirements.txt
+!core.py
+!bot.py
+!internet_features.py
+!dtx_counties.json

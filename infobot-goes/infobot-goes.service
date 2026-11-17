@@ -1,0 +1,21 @@
+[Unit]
+Description=Infobot local GOES EMWIN API
+After=network.target
+
+[Service]
+Type=simple
+User=brad
+Group=brad
+ExecStart=/usr/bin/python3 /opt/infobot-goes/goes_api.py --host 10.0.0.10 --port 8097 --interval 120
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=LC_ALL=C.UTF-8
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

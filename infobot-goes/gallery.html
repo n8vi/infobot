@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Infobot · Received weather maps</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#111923;color:#eaf0f7}body{margin:0;padding:24px;max-width:1500px;margin:auto}h1{font-size:1.7rem;margin:0 0 8px}p{color:#b9c7d8}header{margin-bottom:24px}input,select,button{padding:10px;border:1px solid #4b6074;background:#1b2a39;color:inherit;border-radius:6px}form{display:flex;gap:10px;flex-wrap:wrap}input{flex:1;min-width:150px}#grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:18px}article{background:#1b2a39;border:1px solid #34495e;border-radius:10px;overflow:hidden}article a{display:block;background:#080e15}img{display:block;width:100%;height:260px;object-fit:contain}section{padding:14px}h2{font-size:.95rem;overflow-wrap:anywhere;margin:0 0 10px}small{display:block;color:#b9c7d8;margin:5px 0}a{color:#8ed5ff}.old{color:#ffcb77}#status{min-height:1.5em}
+</style>
+<header><h1>Received weather maps</h1><p>GOES / EMWIN · Local receiver imagery · No online tiles</p>
+<form id="filters"><input id="q" aria-label="Filter products" placeholder="Filter filenames or products…"><select id="source" aria-label="Source"><option value="">All images</option>EMWIN</option><option>IMAGES</option></select><button>Refresh</button></form><p id="status" role="status">Loading…</p></header><main id="grid"></main>
+<script>
+const grid=document.querySelector('#grid'),status=document.querySelector('#status');
+let busy=false;
+async function refresh(){
+ if(busy)return;busy=true;
+ try{
+ const params=new URLSearchParams({q:document.querySelector('#q').value,source:document.querySelector('#source').value});
+ const res=await fetch('v1/maps?'+params);if(!res.ok)throw Error('HTTP '+res.status);
+ const data=await res.json();grid.replaceChildren();
+ status.textContent=data.error?'Index error: '+data.error:!data.ready?'Indexing received images…':`${data.maps.length} products · Updated ${new Date(data.last_scan_at).toLocaleString()}`;
+ if(data.ready&&!data.maps.length)status.textContent+=' · No matching images received.';
+ for(const item of data.maps){
+ const card=document.createElement('article'),link=document.createElement('a'),img=document.createElement('img'),section=document.createElement('section'),title=document.createElement('h2');
+ // Relative URLs keep this gallery usable behind a subpath reverse proxy.
+ const url=item.image_url.replace(/^\//,'');link.href=url;link.target='_blank';link.rel='noopener';img.src=url+'?v='+encodeURIComponent(item.file_mtime);img.alt=item.product;img.loading='lazy';link.append(img);title.textContent=item.product;section.append(title);
+ for(const text of [new Date(item.image_time).toLocaleString()+' ('+item.time_basis+')',item.filename]){const small=document.createElement('small');small.textContent=text;section.append(small);}
+ if(item.older_than_24h){const age=document.createElement('small');age.className='old';age.textContent='Image timestamp is more than 24 hours old';section.append(age);}
+ card.append(link,section);grid.append(card);
+ }
+ }catch(error){status.textContent='Unable to load catalog: '+error.message;}finally{busy=false;}
+}
+document.querySelector('#filters').addEventListener('submit',e=>{e.preventDefault();refresh()});refresh();setInterval(refresh,120000);
+</script></html>

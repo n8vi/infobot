@@ -1,0 +1,76 @@
+services:
+  infobot:
+    image: infobot:0.5.7
+    build: .
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      MESH_HOST: ${MESH_HOST:-10.0.0.10}
+      MESH_PORT: ${MESH_PORT:-5051}
+      GOES_URL: ${GOES_URL:-http://10.0.0.10:8097}
+      AIS_URL: ${AIS_URL:-http://10.0.0.10:8100/api/ships_full.json}
+      ADSB_URL: ${ADSB_URL:-http://hinton/tar1090/data/aircraft.json}
+      AIRCRAFT_MAX_AGE: ${AIRCRAFT_MAX_AGE:-60}
+      SHIP_MAX_AGE: ${SHIP_MAX_AGE:-1800}
+      REPLY_BYTES: ${REPLY_BYTES:-130}
+      REPLY_PARTS: ${REPLY_PARTS:-3}
+      USER_COOLDOWN: ${USER_COOLDOWN:-15}
+      TX_GAP: ${TX_GAP:-6}
+      SAT_ALT_M: ${SAT_ALT_M:-200}
+      SAT_TLE_REFRESH_HOURS: ${SAT_TLE_REFRESH_HOURS:-12}
+      STATE_DB: /state/infobot.sqlite3
+    volumes:
+      - state:/state
+      - type: bind
+        source: /usr/share/zoneinfo
+        target: /usr/share/zoneinfo
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time; d=json.load(open('/state/health.json')); assert d['connected'] and time.time()-d['at']<120"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  infobot-goes:
+    image: infobot-goes:0.3.1
+    build:
+      context: infobot-goes/
+      network: none
+    pull_policy: never
+    restart: unless-stopped
+    user: "${INFOBOT_UID:-1000}:${INFOBOT_GID:-1000}"
+    ports:
+      - "${BIND_IP:-10.0.0.10}:${PORT:-8097}:8097"
+    volumes:
+      - type: bind
+        source: ${GOES_ROOT:-/home/brad/goes/goes-hrit}
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /usr/share/zoneinfo
+        target: /usr/share/zoneinfo
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: ["python", "goes_api.py", "--root", "/data/EMWIN/Text", "--goes-root", "/data", "--host", "0.0.0.0", "--port", "8097", "--interval", "${SCAN_INTERVAL:-120}", "--cors-origin", "${CORS_ORIGIN-*}"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8097/v1/status', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  state:

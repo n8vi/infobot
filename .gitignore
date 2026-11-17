@@ -1,0 +1,95 @@
+# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+**/secrets/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging and build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# Test coverage and reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit.xml
+test-results/
+
+# Logs and runtime state
+*.log
+logs/
+*.pid
+*.pid.lock
+*.sock
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+nohup.out
+
+# Local databases and journal files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Generated data and caches
+cache/
+tmp/
+temp/
+runtime/
+data/
+output/
+outputs/
+
+# Downloaded satellite imagery and generated media
+*.part
+*.partial
+
+# Docker local overrides
+compose.override.yaml
+docker-compose.override.yml
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# OS metadata
+.DS_Store
+Thumbs.db
+.Trash-*/

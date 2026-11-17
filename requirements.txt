@@ -1,0 +1,8 @@
+meshcore==2.3.17
+bleak==3.0.2
+dbus-fast==5.2.0; sys_platform == 'linux'
+pycayennelpp==2.4.0
+pycryptodome==4.4.0
+pyserial-asyncio-fast==0.16
+pyserial==3.5
+skyfield==1.55
