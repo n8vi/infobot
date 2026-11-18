@@ -56,13 +56,15 @@ class RadioTest(unittest.IsolatedAsyncioTestCase):
             finally:writer.close()
         server=await asyncio.start_server(peer,'127.0.0.1',0)
         port=server.sockets[0].getsockname()[1]
-        with tempfile.TemporaryDirectory() as d,patch.dict(os.environ,{'MESH_HOST':'127.0.0.1','MESH_PORT':str(port)}):
+        with tempfile.TemporaryDirectory() as d,patch.dict(os.environ,{'MESH_HOST':'127.0.0.1','MESH_PORT':str(port)}),self.assertLogs(level='INFO') as logs:
             runner=Runner(Config(state=d+'/s.db',gap=0.01))
             task=asyncio.create_task(runner.session())
             try:
                 await asyncio.wait_for(completed.wait(),12)
                 await asyncio.sleep(.3)
                 self.assertEqual(sent,[(1,'Pong!')])
+                self.assertTrue(any("from Brad: text='Brad: ping' command=ping args=[]" in line for line in logs.output))
+                self.assertTrue(any("TX accepted by radio on channel #1 (delivery unconfirmed): 'Pong!'" in line for line in logs.output))
             finally:
                 runner.stop.set()
                 try:await asyncio.wait_for(task,3)
@@ -186,7 +188,7 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
             finally:writer.close()
         server=await asyncio.start_server(peer,'127.0.0.1',0)
         port=server.sockets[0].getsockname()[1]
-        with tempfile.TemporaryDirectory() as d,patch.dict(os.environ,{'MESH_HOST':'127.0.0.1','MESH_PORT':str(port)}):
+        with tempfile.TemporaryDirectory() as d,patch.dict(os.environ,{'MESH_HOST':'127.0.0.1','MESH_PORT':str(port)}),self.assertLogs(level='INFO') as logs:
             runner=Runner(Config(state=d+'/s.db',gap=.01,channels=(('#infobot','bare'),('#other','mention')),
                                  dm_ack_timeout=.5,dm_flood_after=1,dm_retries=2))
             task=asyncio.create_task(runner.session())
@@ -198,6 +200,10 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([x[2] for x in a],[0,1])
                 self.assertEqual(a[0][4],a[1][4])
                 self.assertEqual(resets,[keys[0]])
+                self.assertTrue(any("text='Brad: @[infobot] ping'" in line for line in logs.output))
+                self.assertTrue(any("TX DM accepted by radio" in line and "'Pong!'" in line for line in logs.output))
+                self.assertTrue(any("TX DM receipt confirmed" in line and "'Pong!'" in line for line in logs.output))
+                self.assertTrue(any('flood fallback' in line for line in logs.output))
                 b=next(x for x in sent if x[0]=='dm' and x[1]==keys[1][:6])
                 self.assertLess(sent.index(b),sent.index(a[1]))
             finally:

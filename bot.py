@@ -274,7 +274,8 @@ class Runner:
                     self.attach_rx_metadata(payload)
                     parsed,reason=inspect_admission(payload,slot,now,rules[slot])
                     if parsed is None:
-                        logging.debug('DROP channel message: %s',reason)
+                        if reason!='message from infobot itself':
+                            logging.info('DROP channel #%s message: %s; text=%r',slot,reason,payload.get('text'))
                         return
                     sender,(cmd,args)=parsed
                     conversation=('channel',slot)
@@ -308,11 +309,19 @@ class Runner:
                     task=asyncio.create_task(self.worker(mc,conversation,queue,dead,transmitter))
                     conversations[conversation]=(queue,task)
                 queue,_task=conversations[conversation]
-                if queue.full() or self.queued>=self.config.global_queue_limit: return
-                if self.state.accept_reason(payload,scoped,self.config.cooldown,now): return
+                if queue.full() or self.queued>=self.config.global_queue_limit:
+                    logging.warning('DROP request in %s from %s: queue full; text=%r',conversation,sender,payload.get('text'))
+                    return
+                rejection=self.state.accept_reason(payload,scoped,self.config.cooldown,now)
+                if rejection:
+                    reason,remaining=rejection
+                    logging.info('DROP request in %s from %s: %s (%.1fs remaining); text=%r',
+                                 conversation,sender,reason,remaining,payload.get('text'))
+                    return
                 queue.put_nowait((scoped,cmd,args,payload,time.monotonic()))
                 self.queued+=1
-                logging.info('RX %s: %s',conversation,cmd)
+                logging.info('RX %s from %s: text=%r command=%s args=%r',
+                             conversation,sender,payload.get('text'),cmd,args)
             mc.subscribe(EventType.CHANNEL_MSG_RECV,receive)
             mc.subscribe(EventType.CONTACT_MSG_RECV,receive)
             mc.subscribe(EventType.RX_LOG_DATA,self.receive_rx_log)

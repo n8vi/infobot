@@ -1,6 +1,7 @@
 """Shared radio arbitration and receipt-driven, bounded private delivery."""
 import asyncio
 import inspect
+import logging
 import time
 
 
@@ -51,7 +52,9 @@ class Transmitter:
         async with self.channel_turn:
             result = await self.transmit(lambda: self.mc.commands.send_chan_msg(slot,text), channel=True)
         if not good(result,EventType.OK):
+            logging.warning('TX channel #%s rejected by radio: %r',slot,text)
             raise ConnectionError('Radio did not accept channel reply; not retrying')
+        logging.info('TX accepted by radio on channel #%s (delivery unconfirmed): %r',slot,text)
         return True
 
     async def dm(self, key, text):
@@ -66,7 +69,10 @@ class Transmitter:
         expected, early = set(), set()
         def receipt(event):
             code = event.attributes.get('code',event.payload.get('code'))
-            if code in expected: acked.set()
+            if code in expected:
+                if not acked.is_set():
+                    logging.info('TX DM receipt confirmed from %s (ack=%s): %r',key,code,text)
+                acked.set()
             elif code: early.add(code)
         subscription = self.mc.subscribe(EventType.ACK,receipt)
         flood = False
@@ -77,17 +83,23 @@ class Transmitter:
                     # Reset only this destination, and only after missed receipts.
                     result = await self.mc.commands.reset_path(key)
                     if not good(result,EventType.OK): raise ConnectionError('DM flood path reset failed')
+                    logging.info('TX DM to %s: flood fallback after %s unanswered attempts',key,attempt)
                     flood = True
                 if acked.is_set(): return True
                 result = await self.transmit(lambda: self.mc.commands.send_msg(key,text,timestamp=timestamp,attempt=attempt))
                 if not good(result,EventType.MSG_SENT):
+                    logging.warning('TX DM to %s rejected by radio (attempt %s): %r',key,attempt+1,text)
                     # Without expected_ack we cannot safely identify delivery.
                     raise ConnectionError('Radio did not accept DM reply')
                 flood = result.payload.get('type') == 1
                 code = result.payload['expected_ack']
                 code = code.hex() if isinstance(code,bytes) else code
                 expected.add(code)
-                if code in early: acked.set()
+                logging.info('TX DM accepted by radio for %s (attempt %s/%s, route=%s, ack=%s; awaiting receipt): %r',
+                             key,attempt+1,self.config.dm_retries+1,'flood' if flood else 'direct',code,text)
+                if code in early and not acked.is_set():
+                    logging.info('TX DM receipt confirmed from %s (ack=%s): %r',key,code,text)
+                    acked.set()
                 suggested = result.payload.get('suggested_timeout',0)/1000*1.2
                 timeout = self.config.dm_ack_timeout or max(5,min(300,suggested))
                 try:
@@ -97,7 +109,8 @@ class Transmitter:
                     await self.mc.ensure_contacts(follow=True)
                     return True
                 except asyncio.TimeoutError:
-                    pass
+                    logging.warning('TX DM receipt timed out for %s (attempt %s/%s, timeout=%gs): %r',
+                                    key,attempt+1,self.config.dm_retries+1,timeout,text)
             return acked.is_set()
         finally:
             subscription.unsubscribe()

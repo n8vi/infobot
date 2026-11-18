@@ -204,6 +204,12 @@ completed recent index with products, no index error, and a recent healthy map
 scan; `/v1/status` remains a diagnostic endpoint returning HTTP 200.
 Docker does not restart a container merely because it is unhealthy.
 
+Accepted request text, sender, command arguments, and every transmitted reply
+packet are logged at INFO level, including DMs. Channel logs distinguish radio
+acceptance from unconfirmed delivery; DM logs include attempts, route, receipt
+confirmation, timeouts, and flood fallback. View them with
+`docker compose logs -f --tail=50 infobot`.
+
 ## Network and containers
 
 Normal GOES/AIS/ADS-B sources allow LAN/loopback and local AMPRNet
