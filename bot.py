@@ -2,6 +2,7 @@
 """MeshCore infobot radio adapter. Run --check-sources before taking over radio."""
 import argparse
 import asyncio
+import copy
 from collections import deque
 from contextlib import suppress
 import hashlib
@@ -20,6 +21,18 @@ from delivery import SerializedCommands, Transmitter
 NAME = 'infobot'
 CHANNEL = '#infobot'
 EXPECTED_KEY = hashlib.sha256(CHANNEL.encode()).digest()[:16]
+
+
+class ContactRefreshError(RuntimeError):
+    """The companion did not provide an authoritative DM sender record."""
+
+
+def contact_snapshot(mc):
+    # Normalize keys before merging: a differently cased pending key must not
+    # bypass confirmed-contact precedence. Freeze records for this request.
+    pending={key.lower():value for key,value in mc.pending_contacts.items() if isinstance(key,str)}
+    confirmed={key.lower():value for key,value in mc.contacts.items() if isinstance(key,str)}
+    return copy.deepcopy({**pending,**confirmed})
 
 
 def good(event, expected=None):
@@ -180,6 +193,31 @@ class Runner:
             return engine.execute(cmd,args,payload,contacts)
         return await execute_bounded(engine,cmd,args,payload,contacts,self.config.command_timeout,self.execution_slots)
 
+    async def current_dm_contacts(self,mc,sender):
+        from meshcore import EventType
+        try:
+            result=await asyncio.wait_for(mc.commands.get_contact_by_key(bytes.fromhex(sender)),10)
+        except Exception as error:
+            raise ContactRefreshError('DM sender contact lookup failed') from error
+        if not good(result,EventType.NEXT_CONTACT) or not isinstance(result.payload,dict):
+            raise ContactRefreshError('Companion did not return the DM sender contact')
+        record=result.payload
+        key=record.get('public_key')
+        if not isinstance(key,str) or key.lower()!=sender.lower():
+            raise ContactRefreshError('Companion returned a different contact for the DM sender')
+        key=key.lower()
+        # Replace the complete record; never retain stale route fields from an
+        # older advertisement. Remove pending duplicates only after success.
+        for cached in list(mc.contacts):
+            if isinstance(cached,str) and cached.lower()==key: mc.contacts.pop(cached)
+        mc.contacts[key]=copy.deepcopy(record)
+        for pending in list(mc.pending_contacts):
+            if isinstance(pending,str) and pending.lower()==key: mc.pending_contacts.pop(pending)
+        snapshot=contact_snapshot(mc)
+        logging.info('DM route fetched from companion for %s: hops=%r hash_mode=%r path=%r',
+                     key,record.get('out_path_len'),record.get('out_path_hash_mode'),record.get('out_path'))
+        return snapshot
+
     async def worker(self,mc,conversation,queue,dead,transmitter):
         engine=Engine(self.config)
         engine.started=self.engine.started
@@ -205,9 +243,14 @@ class Runner:
                         self.pending_pages.pop(sender,None)
                         self.worker_health[conversation]={'state':'executing','since':time.monotonic()}
                         try:
+                            contacts=contact_snapshot(mc)
                             if conversation[0]=='dm' and cmd in ('wx','sat','adsb','ais') and not (cmd=='wx' and args):
-                                await asyncio.wait_for(mc.ensure_contacts(follow=True),10)
-                            text=await self.execute(engine,cmd,args,payload,{**mc.contacts,**mc.pending_contacts})
+                                contacts=await self.current_dm_contacts(mc,conversation[1])
+                            text=await self.execute(engine,cmd,args,payload,contacts)
+                        except ContactRefreshError as error:
+                            self.last_command_error=str(error)
+                            logging.warning('DM route refresh failed for %s: %s',conversation[1],error)
+                            text="Location unavailable: couldn't refresh your route from the companion. Try again or use wx <county>."
                         except Exception as error:
                             self.last_command_error=f'{cmd}: {type(error).__name__}: {error}'
                             logging.warning('Command failed in %s: %s',conversation,self.last_command_error)
@@ -299,7 +342,7 @@ class Runner:
                     timestamp=number(payload.get('sender_timestamp'))
                     text=payload.get('text')
                     if timestamp is None or not -30<=now-timestamp<=120 or not isinstance(text,str) or len(text.encode())>512: return
-                    key=self.dm_contact(payload,{**mc.contacts,**mc.pending_contacts})
+                    key=self.dm_contact(payload,contact_snapshot(mc))
                     parsed=parse_command(text)
                     if key is None or parsed is None: return
                     sender=key

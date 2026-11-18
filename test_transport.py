@@ -133,8 +133,8 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
         # All inputs arrive before the first DM receipt times out.
         pending=[('channel',1,'Brad: ping'),('channel',2,'Brad: ping'),
                  ('channel',2,'Brad: @[infobot] ping'),
-                 ('dm',keys[0],'ping'),('dm',keys[1],'ping')]
-        sent=[];resets=[];connections=[];completed=asyncio.Event()
+                 ('dm',keys[0],'wx'),('dm',keys[1],'ping')]
+        sent=[];resets=[];contact_queries=[];connections=[];completed=asyncio.Event()
         def check():
             channels=[x for x in sent if x[0]=='channel']
             a=[x for x in sent if x[0]=='dm' and x[1]==keys[0][:6]]
@@ -164,6 +164,12 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                                         b'User'.ljust(32,b'\0')+ts.to_bytes(4,'little')+
                                         (43900000).to_bytes(4,'little',signed=True)+(-83100000).to_bytes(4,'little',signed=True)+ts.to_bytes(4,'little'))
                         await frame(b'\x04'+ts.to_bytes(4,'little'))
+                    elif cmd==30:
+                        key=body[1:33]
+                        contact_queries.append(key)
+                        await frame(b'\x03'+key+bytes([1,0,65])+b'\xaa\xbb'.ljust(64,b'\0')+
+                                    b'User'.ljust(32,b'\0')+ts.to_bytes(4,'little')+
+                                    (43900000).to_bytes(4,'little',signed=True)+(-83100000).to_bytes(4,'little',signed=True)+ts.to_bytes(4,'little'))
                     elif cmd==10:
                         if pending:
                             kind,target,text=pending.pop(0)
@@ -199,6 +205,9 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
             original_execute=runner.execute
             async def execute(engine,cmd,args,payload,contacts):
                 if payload.get('type')=='PRIV':dm_senders.append(payload.get('_dm_sender'))
+                if cmd=='wx':
+                    self.assertEqual(contacts[keys[0].hex()]['out_path'],'aabb')
+                    return 'Pong!'  # avoid accessing live feeds in the wire test
                 return await original_execute(engine,cmd,args,payload,contacts)
             runner.execute=execute
             task=asyncio.create_task(runner.session())
@@ -210,6 +219,7 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([x[2] for x in a],[0,1])
                 self.assertEqual(a[0][4],a[1][4])
                 self.assertEqual(resets,[keys[0]])
+                self.assertEqual(contact_queries,[keys[0]])
                 self.assertCountEqual(dm_senders,[key.hex() for key in keys])
                 self.assertTrue(any("text='Brad: @[infobot] ping'" in line for line in logs.output))
                 self.assertTrue(any("TX DM accepted by radio" in line and "'Pong!'" in line for line in logs.output))

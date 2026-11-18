@@ -165,7 +165,12 @@ when unambiguous, otherwise the bundled Pinnebog point. Private companion
 messages supply hop count but no correlated raw hop hashes. For DMs the bot
 uses the **last** repeater in the sender's learned outbound return route,
 which is the repeater nearest that sender, rather than always using Pinnebog.
-Pending route updates are refreshed before location-dependent DM commands.
+Before every location-dependent DM command, the bot queries the sender's
+full public key directly from the companion. The returned record replaces the
+confirmed cache, removes pending duplicates, and is copied into the request's
+contact snapshot. Confirmed contacts always take precedence over pending
+advertisements. A failed lookup reports location unavailable instead of using
+a stale route. INFO logs include the fetched hop count, hash mode and path.
 Weather labels this as a DM route estimate: cached return paths may be stale
 or differ from the incoming route. Missing, malformed, or ambiguous return
 routes report location unavailable; `wx <county>` still works. A confirmed

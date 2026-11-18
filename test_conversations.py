@@ -80,8 +80,10 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         from core import request_location
         from test_dm_location import DMLocationTests, SENDER
         contacts=DMLocationTests().contacts()
-        async def refresh(**kwargs):self.mc.contacts.update(contacts)
-        self.mc.ensure_contacts=AsyncMock(side_effect=refresh)
+        from meshcore.events import Event, EventType
+        self.mc.contacts.update(contacts)
+        self.mc.pending_contacts[SENDER]=dict(contacts[SENDER],out_path_len=-1,out_path_hash_mode=-1,out_path='')
+        self.mc.commands=SimpleNamespace(get_contact_by_key=AsyncMock(return_value=Event(EventType.NEXT_CONTACT,dict(contacts[SENDER],public_key=SENDER))))
         sent=[]
         async def execute(engine,cmd,args,payload,current):
             location,error=request_location(payload,current)
@@ -90,7 +92,25 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         async def dm(key,text):sent.append(text);return True
         self.runner.execute=execute
         queue=self.start(('dm',SENDER),SimpleNamespace(dm=dm))
-        self.enqueue(queue,'private-user','wx',{'_dm_sender':SENDER})
+        for cmd in ('wx','sat','adsb','ais'):
+            self.enqueue(queue,'private-user',cmd,{'_dm_sender':SENDER})
         await asyncio.wait_for(queue.join(),1)
-        self.assertEqual(sent,['lapeer'])
-        self.mc.ensure_contacts.assert_awaited_once_with(follow=True)
+        self.assertEqual(sent,['lapeer']*4)
+        self.assertEqual(self.mc.commands.get_contact_by_key.await_count,4)
+        self.mc.commands.get_contact_by_key.assert_awaited_with(bytes.fromhex(SENDER))
+
+    async def test_failed_dm_refresh_does_not_execute_using_cached_route(self):
+        from meshcore.events import Event, EventType
+        from test_dm_location import DMLocationTests,SENDER
+        self.mc.contacts=DMLocationTests().contacts()
+        self.mc.commands=SimpleNamespace(get_contact_by_key=AsyncMock(return_value=Event(EventType.ERROR,{})))
+        execute=AsyncMock(return_value='must not use cached route')
+        self.runner.execute=execute
+        sent=[]
+        async def dm(key,text):sent.append(text);return True
+        queue=self.start(('dm',SENDER),SimpleNamespace(dm=dm))
+        self.enqueue(queue,'private-user','wx',{'_dm_sender':SENDER})
+        with self.assertLogs(level='WARNING'):
+            await asyncio.wait_for(queue.join(),1)
+        execute.assert_not_awaited()
+        self.assertIn("couldn't refresh",sent[0])
