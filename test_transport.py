@@ -19,7 +19,7 @@ from core import Config
 @unittest.skipUnless(HAS_LIBRARY,'install requirements.txt for TCP integration test')
 class RadioTest(unittest.IsolatedAsyncioTestCase):
     async def test_real_library_tcp_ping_and_channel_isolation(self):
-        sent=[];completed=asyncio.Event();connections=[]
+        sent=[];adverts=[];completed=asyncio.Event();connections=[]
         ts=int(time.time())
         pending=[(0,'Stranger: ping',ts),(1,'infobot: ping',ts),
                  (1,'Old: ping',ts-600),(1,'Brad: ping',ts),(1,'Brad: ping',ts)]
@@ -47,6 +47,9 @@ class RadioTest(unittest.IsolatedAsyncioTestCase):
                             await frame(bytes([17,20,0,0,ch,64,0])+timestamp.to_bytes(4,'little')+text.encode())
                             await frame(b'\x83')
                         else:await frame(b'\x0a')
+                    elif cmd==7:
+                        adverts.append(body)
+                        await frame(b'\0')
                     elif cmd==3:
                         sent.append((body[2],body[7:].decode()))
                         await frame(b'\0');completed.set()
@@ -63,6 +66,7 @@ class RadioTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(completed.wait(),12)
                 await asyncio.sleep(.3)
                 self.assertEqual(sent,[(1,'Pong!')])
+                self.assertEqual(adverts,[b'\x07\x01'])
                 self.assertTrue(any("from Brad: text='Brad: ping' command=ping args=[]" in line for line in logs.output))
                 self.assertTrue(any("TX accepted by radio on channel #1 (delivery unconfirmed): 'Pong!'" in line for line in logs.output))
             finally:

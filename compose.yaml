@@ -29,6 +29,7 @@ services:
       CONVERSATION_LIMIT: ${CONVERSATION_LIMIT:-32}
       QUEUE_LIMIT: ${QUEUE_LIMIT:-8}
       GLOBAL_QUEUE_LIMIT: ${GLOBAL_QUEUE_LIMIT:-64}
+      ADVERT_INTERVAL: ${ADVERT_INTERVAL:-14400}
       STATE_DB: /state/infobot.sqlite3
     volumes:
       - state:/state

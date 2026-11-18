@@ -57,6 +57,16 @@ class Transmitter:
         logging.info('TX accepted by radio on channel #%s (delivery unconfirmed): %r',slot,text)
         return True
 
+    async def advert(self):
+        from meshcore import EventType
+        # Flood adverts propagate discovery beyond immediate neighbors. Use
+        # the same pacing/arbitration as channel traffic, without blocking DMs.
+        async with self.channel_turn:
+            result = await self.transmit(lambda: self.mc.commands.send_advert(flood=True),channel=True)
+        if not good(result,EventType.OK):
+            raise ConnectionError('Radio did not accept flood advert')
+        logging.info('TX flood advert accepted by radio (reception unconfirmed)')
+
     async def dm(self, key, text):
         from meshcore import EventType
         # Keep a message identity stable across retries, and distinguish even

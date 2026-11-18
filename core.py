@@ -71,6 +71,7 @@ class Config:
     queue_limit: int = 8
     global_queue_limit: int = 64
     command_workers: int = 4
+    advert_interval: float = 14400
 
     @classmethod
     def env(cls):
@@ -100,14 +101,17 @@ class Config:
         if enabled not in ('true', 'false', '1', '0'):
             raise ValueError('DM_ENABLED must be true or false')
         c.dm_enabled = enabled in ('true', '1')
-        for attr, key in [('dm_ack_timeout','DM_ACK_TIMEOUT'), ('command_timeout','COMMAND_TIMEOUT')]:
+        for attr, key in [('dm_ack_timeout','DM_ACK_TIMEOUT'), ('command_timeout','COMMAND_TIMEOUT'),
+                          ('advert_interval','ADVERT_INTERVAL')]:
             setattr(c, attr, float(os.getenv(key, str(getattr(c, attr)))))
         for attr, key in [('dm_retries','DM_RETRIES'), ('dm_flood_after','DM_FLOOD_AFTER'),
                           ('conversation_limit','CONVERSATION_LIMIT'), ('queue_limit','QUEUE_LIMIT'),
                           ('global_queue_limit','GLOBAL_QUEUE_LIMIT'), ('command_workers','COMMAND_WORKERS')]:
             setattr(c, attr, int(os.getenv(key, str(getattr(c, attr)))))
-        if any(not math.isfinite(v) for v in (c.gap,c.cooldown,c.sat_alt_m,c.sat_tle_refresh_hours,c.dm_ack_timeout,c.command_timeout)):
+        if any(not math.isfinite(v) for v in (c.gap,c.cooldown,c.sat_alt_m,c.sat_tle_refresh_hours,c.dm_ack_timeout,c.command_timeout,c.advert_interval)):
             raise ValueError('Numeric settings must be finite')
+        if c.advert_interval != 0 and c.advert_interval < 60:
+            raise ValueError('ADVERT_INTERVAL must be 0 (disabled) or at least 60 seconds')
         if not 0 <= c.dm_retries <= 3 or not 1 <= c.dm_flood_after <= 4 or not 0 <= c.dm_ack_timeout <= 300:
             raise ValueError('DM_RETRIES 0..3, DM_FLOOD_AFTER 1..4, DM_ACK_TIMEOUT 0..300 required')
         if not 1 <= c.command_timeout <= 300 or not 1 <= c.command_workers <= 16:

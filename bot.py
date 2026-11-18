@@ -120,6 +120,7 @@ class Runner:
         self.pending_pages={}
         self.execution_slots=asyncio.Semaphore(config.command_workers)
         self.retired_tasks=set()
+        self.next_advert=0.0
         self.stop=asyncio.Event()
         self.health_path=Path(config.state).with_name('health.json')
 
@@ -243,6 +244,18 @@ class Runner:
                  if isinstance(key,str) and re.fullmatch(r'[0-9a-fA-F]{64}',key) and key.lower().startswith(prefix.lower())}
         return next(iter(matches)) if len(matches)==1 else None
 
+    async def advertise_if_due(self,transmitter):
+        if not self.config.advert_interval or self.stop.is_set() or time.monotonic()<self.next_advert:
+            return
+        try:
+            await transmitter.advert()
+        except Exception as error:
+            self.next_advert=time.monotonic()+60
+            logging.warning('Advert failed; retrying in 60s: %s',error)
+        else:
+            # Keep the deadline across reconnects to avoid an advert storm.
+            self.next_advert=time.monotonic()+self.config.advert_interval
+
     async def session(self):
         from meshcore import MeshCore,EventType
         host=os.getenv('MESH_HOST','10.0.0.10');port=int(os.getenv('MESH_PORT','5051'))
@@ -325,18 +338,21 @@ class Runner:
             mc.subscribe(EventType.CHANNEL_MSG_RECV,receive)
             mc.subscribe(EventType.CONTACT_MSG_RECV,receive)
             mc.subscribe(EventType.RX_LOG_DATA,self.receive_rx_log)
+            await self.advertise_if_due(transmitter)
             await mc.start_auto_message_fetching()
             logging.info('Listening as infobot v%s: channels %s; DMs %s',VERSION,list(self.config.channels),self.config.dm_enabled)
             self.health(True)
             while not dead.is_set() and not self.stop.is_set():
                 waiters=[asyncio.create_task(dead.wait()),asyncio.create_task(self.stop.wait())]
-                done,pending=await asyncio.wait(waiters,timeout=30,return_when=asyncio.FIRST_COMPLETED)
+                timeout=min(30,max(.1,self.next_advert-time.monotonic())) if self.config.advert_interval else 30
+                done,pending=await asyncio.wait(waiters,timeout=timeout,return_when=asyncio.FIRST_COMPLETED)
                 for task in pending: task.cancel()
                 await asyncio.gather(*pending,return_exceptions=True)
                 if not done:
                     result=await mc.commands.get_bat()
                     if not good(result): raise ConnectionError('Radio heartbeat failed')
                     await mc.ensure_contacts(follow=True)
+                    await self.advertise_if_due(transmitter)
                     self.health(True)
         finally:
             self.health(False)

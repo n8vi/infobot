@@ -82,6 +82,20 @@ conversations can make progress, including while one DM awaits a receipt or
 one command waits on a data source. The shared radio serializes actual send
 commands; packet order is preserved within each conversation.
 
+## Discovery adverts
+
+Normal startup sends a flood advert so clients can discover the bot for DMs.
+Adverts repeat every four hours by default. Optional `ADVERT_INTERVAL` is in
+seconds: `14400` by default, at least `60`, or `0` to disable. Existing `.env`
+files need no changes. Setup, inspect, preview and source-check modes do not
+send adverts.
+
+Adverts share the channel transmission gap and radio arbitration, and use the
+companion's configured flood scope. Reconnects retain the running schedule;
+a process restart advertises again. A failed send is logged and retried after
+60 seconds rather than waiting four hours. Successful radio acceptance is
+logged, without claiming every client received the advert.
+
 ## Private delivery and radio pacing
 
 Channel replies are sent once, without delivery confirmation. `TX_GAP`
