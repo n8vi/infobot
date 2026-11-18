@@ -160,10 +160,16 @@ Keep host and companion clocks synchronized. Duplicate fingerprints persist
 For location-dependent commands, captured flood paths resolve hop 1 against
 local repeater contacts. Unknown/colliding hashes and missing coordinates are
 reported. Radio logs must match message identity; timestamp proximity alone
-is insufficient. Pathless/direct requests use advertised Pinnebog coordinates
+is insufficient. Pathless/direct channel requests use advertised Pinnebog coordinates
 when unambiguous, otherwise the bundled Pinnebog point. Private companion
-messages supply hop count but no correlated raw hop hashes, so DMs use that
-same pathless fallback. No internet geolocation is used.
+messages supply hop count but no correlated raw hop hashes. For DMs the bot
+uses the **last** repeater in the sender's learned outbound return route,
+which is the repeater nearest that sender, rather than always using Pinnebog.
+Pending route updates are refreshed before location-dependent DM commands.
+Weather labels this as a DM route estimate: cached return paths may be stale
+or differ from the incoming route. Missing, malformed, or ambiguous return
+routes report location unavailable; `wx <county>` still works. A confirmed
+zero-hop return route retains the local Pinnebog fallback. No internet geolocation is used.
 
 Weather uses bundled land-only Census TIGER/Line 2024 county polygons for the
 17 Detroit/Pontiac counties: Midland, Bay, Huron, Saginaw, Tuscola, Sanilac,

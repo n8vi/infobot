@@ -35,15 +35,15 @@ HELP_DETAIL = {
  'path': 'path: repeaters on this message route. path aabb,ccdd: decode supplied hashes. Bare hex defaults to 2-byte hops. Unknown/colliding hashes are marked.',
  'hashsize': 'hashsize/region: path hash bytes per hop and the flood region tag on this command packet. Region names are matched against configured local hashtag regions.',
  'aurora': 'aurora/spacewx: GOES Forecast Discussion (DAYDIS), with forecast text for solar activity, particles, solar wind and geospace.',
- 'adsb': 'adsb/planes: current fresh aircraft from Hinton, nearest-first from hop 1; direct or pathless requests use Pinnebog. more: remaining aircraft.',
- 'ais': 'ais/boats: vessels heard by tarratt.net within 30 min, nearest-first from hop 1; direct or pathless requests use Pinnebog. more: remaining vessels.',
+ 'adsb': 'adsb/planes: current fresh aircraft from Hinton, nearest-first from hop 1; DMs use the learned sender-side route; direct/pathless channel requests use Pinnebog. more: remaining aircraft.',
+ 'ais': 'ais/boats: vessels heard by tarratt.net within 30 min, nearest-first from hop 1; DMs use the learned sender-side route; direct/pathless channel requests use Pinnebog. more: remaining vessels.',
  'ping': 'ping: no argument replies Pong! ping <IPv4|IPv6|hostname> sends 3 ICMP probes and reports loss/latency.', 'status': 'status: uptime and last data-source request results; GOES discussion freshness.',
  'about': 'about: version and operating notes for infobot.',
  'more': 'more: next page of your last long reply. Expires after 10 min. Channel names are not authenticated identities.',
  'repeat': 'repeat <page>: resend a page from the last reply without advancing the more cursor.',
  'internet': 'internet: test outbound DNS reachability by querying several DNS root servers directly.',
  'get': 'get <http(s) URL>: fetch public text and return it unchanged only if it fits in one MeshCore packet.',
- 'sat': 'sat: amateur satellites up or rising within an hour for hop 1; direct or pathless requests use Pinnebog. sat <NORAD ID|name[,name...]>: next pass.',
+ 'sat': 'sat: amateur satellites up or rising within an hour for hop 1; DMs use the learned sender-side route; direct/pathless channel requests use Pinnebog. sat <NORAD ID|name[,name...]>: next pass.',
 }
 
 @dataclass
@@ -396,7 +396,35 @@ def _pinnebog_location(contacts):
     return {'lat': lat, 'lon': lon, 'name': name, 'county': county, 'county_boundary': on_boundary}
 
 
+def dm_location(sender,contacts):
+    """Estimate DM origin from the sender end of the learned OUTBOUND route.
+
+    The companion does not expose a DM's received hop hashes. Its stored path
+    runs from us to the sender, so the LAST hop is the sender-side repeater.
+    This is a cached route estimate, never claimed as a captured incoming path.
+    """
+    contact=next((value for key,value in contacts.items()
+                  if isinstance(key,str) and key.lower()==sender.lower() and isinstance(value,dict)),None)
+    if contact is None:
+        return None, 'Location unavailable: DM sender is missing from local contacts.'
+    count=contact.get('out_path_len')
+    raw=contact.get('out_path')
+    if count==0 and raw=='':
+        return _pinnebog_location(contacts),None
+    mode=contact.get('out_path_hash_mode')
+    if not isinstance(count,int) or not 1<=count<=63 or mode not in (0,1,2):
+        return None, 'Location unavailable: no usable learned return route for this DM sender. Use wx <county>.'
+    width=2*(mode+1)
+    if not isinstance(raw,str) or len(raw)!=count*width or not re.fullmatch(r'[0-9a-fA-F]+',raw):
+        return None, 'Location unavailable: DM sender return route is malformed.'
+    location,error=_repeater_location(raw[-width:].lower(),contacts,'DM sender-side')
+    if location is not None: location['basis']='dm_return_route'
+    return location,error
+
+
 def request_location(payload, contacts):
+    if payload.get('_dm_sender'):
+        return dm_location(payload['_dm_sender'],contacts)
     route_kind = _route_kind(payload)
     if route_kind == 'direct':
         return _pinnebog_location(contacts), None
@@ -417,6 +445,10 @@ def request_location(payload, contacts):
     if not isinstance(raw, str) or not re.fullmatch(r'[0-9a-fA-F]+', raw) or len(raw) < width:
         return None, 'Location unavailable: the received path is malformed.'
     hop = raw[:width].lower()
+    return _repeater_location(hop,contacts)
+
+
+def _repeater_location(hop,contacts,label='hop-1'):
     matches = []
     for key, contact in contacts.items():
         if not isinstance(key, str) or not isinstance(contact, dict) or not key.lower().startswith(hop):
@@ -428,14 +460,14 @@ def request_location(payload, contacts):
         if kind in (2, 3):
             matches.append((key, contact))
     if len(matches) != 1:
-        return None, 'Location unavailable: hop-1 repeater is missing or ambiguous in local contacts.'
+        return None, f'Location unavailable: {label} repeater is missing or ambiguous in local contacts.'
     _, contact = matches[0]
     coords = _coordinates(contact)
     if coords is None:
-        return None, 'Location unavailable: hop-1 repeater has no advertised coordinates.'
+        return None, f'Location unavailable: {label} repeater has no advertised coordinates.'
     lat, lon = coords
     county, on_boundary = county_for_location(lat, lon)
-    name = clean(contact.get('adv_name') or 'hop 1')
+    name = clean(contact.get('adv_name') or label)
     return {'lat': lat, 'lon': lon, 'name': name, 'county': county, 'county_boundary': on_boundary}, None
 
 
@@ -886,7 +918,10 @@ class Engine:
                 return 'Use wx [county] from the 17 NWS Detroit/Pontiac counties.'
             location,error=request_location(payload,contacts) if not county else (None,None)
             if error:return error
-            return weather(self.sources.get('GOES',c.goes+'/v1/weather'),county,now,location)
+            text=weather(self.sources.get('GOES',c.goes+'/v1/weather'),county,now,location)
+            if location and location.get('basis')=='dm_return_route':
+                text=f'WX near {location["name"]} (DM route estimate):\n'+text
+            return text
         if cmd=='aurora':return spaceweather(self.sources.get('GOES',c.goes+'/v1/spaceweather'),now)
         if cmd=='adsb':
             location,error=request_location(payload,contacts)

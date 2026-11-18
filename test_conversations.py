@@ -3,6 +3,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock
 from bot import Runner
 from core import Config
 
@@ -27,9 +28,9 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.tasks.append(asyncio.create_task(self.runner.worker(self.mc,key,queue,self.dead,tx)))
         return queue
 
-    def enqueue(self,queue,sender,cmd):
+    def enqueue(self,queue,sender,cmd,payload=None):
         self.runner.queued+=1
-        queue.put_nowait((sender,cmd,[],{},time.monotonic()))
+        queue.put_nowait((sender,cmd,[],payload or {},time.monotonic()))
 
     async def test_slow_channel_preserves_own_order_without_blocking_others(self):
         gate=asyncio.Event();started=asyncio.Event();second=asyncio.Event();sent=[]
@@ -74,3 +75,22 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runner.dm_contact({'pubkey_prefix':prefix},contacts))
         del contacts[prefix+'22'*26]
         self.assertEqual(self.runner.dm_contact({'pubkey_prefix':prefix},contacts),prefix+'11'*26)
+
+    async def test_dm_location_refreshes_contacts_before_execution(self):
+        from core import request_location
+        from test_dm_location import DMLocationTests, SENDER
+        contacts=DMLocationTests().contacts()
+        async def refresh(**kwargs):self.mc.contacts.update(contacts)
+        self.mc.ensure_contacts=AsyncMock(side_effect=refresh)
+        sent=[]
+        async def execute(engine,cmd,args,payload,current):
+            location,error=request_location(payload,current)
+            self.assertIsNone(error)
+            return location['county']
+        async def dm(key,text):sent.append(text);return True
+        self.runner.execute=execute
+        queue=self.start(('dm',SENDER),SimpleNamespace(dm=dm))
+        self.enqueue(queue,'private-user','wx',{'_dm_sender':SENDER})
+        await asyncio.wait_for(queue.join(),1)
+        self.assertEqual(sent,['lapeer'])
+        self.mc.ensure_contacts.assert_awaited_once_with(follow=True)

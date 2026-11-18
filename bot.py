@@ -205,6 +205,8 @@ class Runner:
                         self.pending_pages.pop(sender,None)
                         self.worker_health[conversation]={'state':'executing','since':time.monotonic()}
                         try:
+                            if conversation[0]=='dm' and cmd in ('wx','sat','adsb','ais') and not (cmd=='wx' and args):
+                                await asyncio.wait_for(mc.ensure_contacts(follow=True),10)
                             text=await self.execute(engine,cmd,args,payload,{**mc.contacts,**mc.pending_contacts})
                         except Exception as error:
                             self.last_command_error=f'{cmd}: {type(error).__name__}: {error}'
@@ -303,9 +305,9 @@ class Runner:
                     sender=key
                     cmd,args=parsed
                     conversation=('dm',key)
-                    # Private RX logs cannot be correlated using group plaintext.
-                    # Companion DMs carry hop count, not the captured hop hashes;
-                    # pathless DM requests use the existing Pinnebog fallback.
+                    # A private RX event has no captured hop hashes. Resolve
+                    # its location separately using this sender's learned route.
+                    payload['_dm_sender']=key
                 scoped=json.dumps([*conversation,sender],separators=(',',':'))
                 payload['_conversation']=json.dumps(conversation)
                 if conversation not in conversations:

@@ -195,6 +195,12 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as d,patch.dict(os.environ,{'MESH_HOST':'127.0.0.1','MESH_PORT':str(port)}),self.assertLogs(level='INFO') as logs:
             runner=Runner(Config(state=d+'/s.db',gap=.01,channels=(('#infobot','bare'),('#other','mention')),
                                  dm_ack_timeout=.5,dm_flood_after=1,dm_retries=2))
+            dm_senders=[]
+            original_execute=runner.execute
+            async def execute(engine,cmd,args,payload,contacts):
+                if payload.get('type')=='PRIV':dm_senders.append(payload.get('_dm_sender'))
+                return await original_execute(engine,cmd,args,payload,contacts)
+            runner.execute=execute
             task=asyncio.create_task(runner.session())
             try:
                 await asyncio.wait_for(completed.wait(),15)
@@ -204,6 +210,7 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([x[2] for x in a],[0,1])
                 self.assertEqual(a[0][4],a[1][4])
                 self.assertEqual(resets,[keys[0]])
+                self.assertCountEqual(dm_senders,[key.hex() for key in keys])
                 self.assertTrue(any("text='Brad: @[infobot] ping'" in line for line in logs.output))
                 self.assertTrue(any("TX DM accepted by radio" in line and "'Pong!'" in line for line in logs.output))
                 self.assertTrue(any("TX DM receipt confirmed" in line and "'Pong!'" in line for line in logs.output))
