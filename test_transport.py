@@ -187,6 +187,12 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                         sent.append(('dm',key,attempt,text,body[3:7]))
                         code=len(sent).to_bytes(4,'little')
                         await frame(b'\x06'+bytes([int(attempt>0)])+code+(10).to_bytes(4,'little'))
+                        # Raw RF ACKs must be visible but must not confirm delivery
+                        # without a matching companion receipt notification.
+                        await frame(b'\x88\x00\xba'+b'\x0e\x00'+code)
+                        await frame(b'\x88\x00\xba'+b'\x21\x00'+bytes(8))
+                        await frame(b'\x82'+b'\xff'*4+(5).to_bytes(4,'little'))
+                        await frame(b'\x81'+next(k for k in keys if k[:6]==key))
                         if key!=keys[0][:6] or attempt>0:
                             await frame(b'\x82'+code+(5).to_bytes(4,'little'))
                         check()
@@ -225,6 +231,10 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any("TX DM accepted by radio" in line and "'Pong!'" in line for line in logs.output))
                 self.assertTrue(any("TX DM receipt confirmed" in line and "'Pong!'" in line for line in logs.output))
                 self.assertTrue(any('flood fallback' in line for line in logs.output))
+                self.assertTrue(any("RX ACK event: code='ffffffff'" in line for line in logs.output))
+                self.assertTrue(any('RX raw ACK packet:' in line for line in logs.output))
+                self.assertTrue(any('RX encrypted PATH packet' in line for line in logs.output))
+                self.assertTrue(any('RX PATH_UPDATE event:' in line for line in logs.output))
                 b=next(x for x in sent if x[0]=='dm' and x[1]==keys[1][:6])
                 self.assertLess(sent.index(b),sent.index(a[1]))
             finally:

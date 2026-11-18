@@ -137,7 +137,7 @@ class Runner:
         self.stop=asyncio.Event()
         self.health_path=Path(config.state).with_name('health.json')
 
-    def receive_rx_log(self,event):
+    def receive_rx_log(self,event,transmitter=None):
         log=event.payload
         if not isinstance(log,dict):return
         raw=log.get('payload') or log.get('raw_hex') or log.get('raw')
@@ -148,6 +148,7 @@ class Runner:
             if fields.get(key) is None:
                 fields[key]=value
         self.rx_logs.append((time.monotonic(),fields))
+        if transmitter is not None: transmitter.log_rx_packet(fields)
 
     def attach_rx_metadata(self,payload):
         now=time.monotonic()
@@ -306,6 +307,7 @@ class Runner:
         host=os.getenv('MESH_HOST','10.0.0.10');port=int(os.getenv('MESH_PORT','5051'))
         await asyncio.wait_for(asyncio.to_thread(local_addresses,host,port),10)
         mc=None
+        diagnostics=[]
         conversations={}
         self.worker_health={}
         self.queued=0
@@ -322,6 +324,8 @@ class Runner:
             await mc.ensure_contacts()
             dead=asyncio.Event()
             transmitter=Transmitter(mc,self.config)
+            diagnostics=[mc.subscribe(EventType.ACK,transmitter.log_receipt),
+                         mc.subscribe(EventType.PATH_UPDATE,transmitter.log_path_update)]
             mc.subscribe(EventType.DISCONNECTED,lambda event:dead.set())
             def receive(event):
                 payload=dict(event.payload)
@@ -382,7 +386,7 @@ class Runner:
                              conversation,sender,payload.get('text'),cmd,args)
             mc.subscribe(EventType.CHANNEL_MSG_RECV,receive)
             mc.subscribe(EventType.CONTACT_MSG_RECV,receive)
-            mc.subscribe(EventType.RX_LOG_DATA,self.receive_rx_log)
+            mc.subscribe(EventType.RX_LOG_DATA,lambda event:self.receive_rx_log(event,transmitter))
             await self.advertise_if_due(transmitter)
             await mc.start_auto_message_fetching()
             logging.info('Listening as infobot v%s: channels %s; DMs %s',VERSION,list(self.config.channels),self.config.dm_enabled)
@@ -401,6 +405,7 @@ class Runner:
                     self.health(True)
         finally:
             self.health(False)
+            for subscription in diagnostics: subscription.unsubscribe()
             tasks=[task for _queue,task in conversations.values()] + list(self.retired_tasks)
             for task in tasks: task.cancel()
             await asyncio.gather(*tasks,return_exceptions=True)

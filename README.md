@@ -235,6 +235,27 @@ acceptance from unconfirmed delivery; DM logs include attempts, route, receipt
 confirmation, timeouts, and flood fallback. View them with
 `docker compose logs -f --tail=50 infobot`.
 
+Receipt diagnostics are also logged at INFO without additional configuration:
+
+- `DM ACK wait`: expected codes (including previous attempts), message timestamp,
+  companion-suggested timeout and the actual configured timeout.
+- `RX ACK event`: every companion receipt notification, including unmatched or
+  late receipts with no active send, round-trip milliseconds and pending peers.
+  An early event can show an empty expected list while the send result is pending;
+  the existing receipt-confirmed line records a later successful match.
+- `RX raw ACK packet`: an RF ACK heard in the radio RX log, its wire-order code,
+  payload hex and route metadata. Hearing it alone does not confirm delivery.
+- `RX encrypted PATH packet`: a path return was heard; encrypted contents cannot
+  be assumed to contain a matching receipt.
+- `RX PATH_UPDATE event`: the companion reports a changed contact route.
+- `DM ACK tracking ended`: whether the pending response was confirmed before
+  tracking ended, with its expected codes.
+
+Raw packets are available only when the companion supplies RX log events.
+A raw ACK without a companion receipt event points to a different failure
+stage than a receipt event whose code differs from the pending codes. These
+observations do not alter receipt matching, retry counts, or timeout settings.
+
 ## Network and containers
 
 Normal GOES/AIS/ADS-B sources allow LAN/loopback and local AMPRNet

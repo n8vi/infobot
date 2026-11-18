@@ -35,6 +35,45 @@ class Transmitter:
         self.channel_turn = asyncio.Lock()
         self.last_tx = 0
         self.timestamps = {}
+        self.pending_receipts = {}
+
+    def receipt_expectations(self):
+        return [dict(peer=item['peer'],timestamp=item['timestamp'],attempt=item['attempt'],
+                     awaiting_send_result=item['awaiting_send_result'],
+                     expected=sorted(item['expected'],key=repr))
+                for item in self.pending_receipts.values()]
+
+    def log_receipt(self,event):
+        # This observer never acknowledges messages or changes retry state.
+        # Log unmatched, early and late events even when no DM is waiting.
+        code=event.attributes.get('code',event.payload.get('code'))
+        matches=[item['peer'] for item in self.pending_receipts.values() if code in item['expected']]
+        logging.info('RX ACK event: code=%r payload_code=%r trip_time_ms=%r matching_peers=%r pending=%r',
+                     code,event.payload.get('code'),event.payload.get('trip_time'),matches,self.receipt_expectations())
+
+    def log_path_update(self,event):
+        logging.info('RX PATH_UPDATE event: peer=%r pending=%r',
+                     event.payload.get('public_key'),self.receipt_expectations())
+
+    def log_rx_packet(self,fields):
+        kind=fields.get('payload_type')
+        if kind not in (3,8): return  # public ACK or encrypted PATH return
+        payload=fields.get('pkt_payload',b'')
+        if isinstance(payload,str):
+            try: payload=bytes.fromhex(payload)
+            except ValueError: payload=b''
+        if not isinstance(payload,(bytes,bytearray)): payload=b''
+        if kind==3:
+            logging.info('RX raw ACK packet: code=%r payload_hex=%s route=%r hops=%r hash_bytes=%r path=%r pending=%r',
+                         payload[:4].hex() if len(payload)>=4 else None,payload.hex(),
+                         fields.get('route_type'),fields.get('path_len'),fields.get('path_hash_size'),
+                         fields.get('path'),self.receipt_expectations())
+        else:
+            # PATH contents are encrypted; their presence alone cannot confirm
+            # any pending message. Do not log ciphertext as a decoded receipt.
+            logging.info('RX encrypted PATH packet (not delivery confirmation): route=%r hops=%r hash_bytes=%r path=%r payload_bytes=%s pending=%r',
+                         fields.get('route_type'),fields.get('path_len'),fields.get('path_hash_size'),
+                         fields.get('path'),len(payload),self.receipt_expectations())
 
     async def transmit(self, action, channel=False):
         # Sleep outside the lock: a channel's cooldown never blocks a ready DM.
@@ -77,6 +116,9 @@ class Transmitter:
         if len(self.timestamps)>512: self.timestamps.pop(next(iter(self.timestamps)))
         acked = asyncio.Event()
         expected, early = set(), set()
+        tracking=object()
+        self.pending_receipts[tracking]=dict(peer=key,timestamp=timestamp,attempt=0,
+                                            awaiting_send_result=True,expected=expected)
         def receipt(event):
             code = event.attributes.get('code',event.payload.get('code'))
             if code in expected:
@@ -96,6 +138,7 @@ class Transmitter:
                     logging.info('TX DM to %s: flood fallback after %s unanswered attempts',key,attempt)
                     flood = True
                 if acked.is_set(): return True
+                self.pending_receipts[tracking].update(attempt=attempt+1,awaiting_send_result=True)
                 result = await self.transmit(lambda: self.mc.commands.send_msg(key,text,timestamp=timestamp,attempt=attempt))
                 if not good(result,EventType.MSG_SENT):
                     logging.warning('TX DM to %s rejected by radio (attempt %s): %r',key,attempt+1,text)
@@ -105,6 +148,7 @@ class Transmitter:
                 code = result.payload['expected_ack']
                 code = code.hex() if isinstance(code,bytes) else code
                 expected.add(code)
+                self.pending_receipts[tracking]['awaiting_send_result']=False
                 logging.info('TX DM accepted by radio for %s (attempt %s/%s, route=%s, ack=%s; awaiting receipt): %r',
                              key,attempt+1,self.config.dm_retries+1,'flood' if flood else 'direct',code,text)
                 if code in early and not acked.is_set():
@@ -112,6 +156,8 @@ class Transmitter:
                     acked.set()
                 suggested = result.payload.get('suggested_timeout',0)/1000*1.2
                 timeout = self.config.dm_ack_timeout or max(5,min(300,suggested))
+                logging.info('DM ACK wait: peer=%s timestamp=%s attempt=%s expected=%r suggested_timeout_ms=%r timeout=%gs',
+                             key,timestamp,attempt+1,sorted(expected,key=repr),result.payload.get('suggested_timeout'),timeout)
                 try:
                     await asyncio.wait_for(acked.wait(),timeout)
                     # PATH_UPDATE marks contacts dirty. Refresh before the next
@@ -124,3 +170,6 @@ class Transmitter:
             return acked.is_set()
         finally:
             subscription.unsubscribe()
+            self.pending_receipts.pop(tracking,None)
+            logging.info('DM ACK tracking ended: peer=%s timestamp=%s confirmed=%s expected=%r',
+                         key,timestamp,acked.is_set(),sorted(expected,key=repr))
