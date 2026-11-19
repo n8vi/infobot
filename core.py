@@ -13,11 +13,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
-import urllib.request
 from zoneinfo import ZoneInfo
-from internet_features import SatellitePasses, fetch_one_packet, internet_status
+from internet_features import SatellitePasses, fetch_one_packet, internet_status, _PinnedHTTP, _PinnedHTTPS
+import ssl
 
-VERSION = '0.5.7'
+VERSION = '0.6.0'
 LOCAL = ZoneInfo('America/Detroit')
 PINNEBOG_COORDINATES = (43.935292, -83.103839)
 with open(os.path.join(os.path.dirname(__file__), 'dtx_counties.json'), encoding='utf-8') as _county_file:
@@ -35,15 +35,15 @@ HELP_DETAIL = {
  'path': 'path: repeaters on this message route. path aabb,ccdd: decode supplied hashes. Bare hex defaults to 2-byte hops. Unknown/colliding hashes are marked.',
  'hashsize': 'hashsize/region: path hash bytes per hop and the flood region tag on this command packet. Region names are matched against configured local hashtag regions.',
  'aurora': 'aurora/spacewx: GOES Forecast Discussion (DAYDIS), with forecast text for solar activity, particles, solar wind and geospace.',
- 'adsb': 'adsb/planes: current fresh aircraft from Hinton, nearest-first from hop 1; direct or pathless requests use Pinnebog. more: remaining aircraft.',
- 'ais': 'ais/boats: vessels heard by tarratt.net within 30 min, nearest-first from hop 1; direct or pathless requests use Pinnebog. more: remaining vessels.',
+ 'adsb': 'adsb/planes: current fresh aircraft from Hinton, nearest-first from hop 1; DMs use the learned sender-side route; direct/pathless channel requests use Pinnebog. more: remaining aircraft.',
+ 'ais': 'ais/boats: vessels heard by tarratt.net within 30 min, nearest-first from hop 1; DMs use the learned sender-side route; direct/pathless channel requests use Pinnebog. more: remaining vessels.',
  'ping': 'ping: no argument replies Pong! ping <IPv4|IPv6|hostname> sends 3 ICMP probes and reports loss/latency.', 'status': 'status: uptime and last data-source request results; GOES discussion freshness.',
  'about': 'about: version and operating notes for infobot.',
  'more': 'more: next page of your last long reply. Expires after 10 min. Channel names are not authenticated identities.',
  'repeat': 'repeat <page>: resend a page from the last reply without advancing the more cursor.',
  'internet': 'internet: test outbound DNS reachability by querying several DNS root servers directly.',
  'get': 'get <http(s) URL>: fetch public text and return it unchanged only if it fits in one MeshCore packet.',
- 'sat': 'sat: amateur satellites up or rising within an hour for hop 1; direct or pathless requests use Pinnebog. sat <NORAD ID|name[,name...]>: next pass.',
+ 'sat': 'sat: amateur satellites up or rising within an hour for hop 1; DMs use the learned sender-side route; direct/pathless channel requests use Pinnebog. sat <NORAD ID|name[,name...]>: next pass.',
 }
 
 @dataclass
@@ -61,6 +61,17 @@ class Config:
     state: str = '/state/infobot.sqlite3'
     sat_alt_m: float = 200
     sat_tle_refresh_hours: float = 12
+    channels: tuple = (('#infobot', 'bare'),)
+    dm_enabled: bool = True
+    dm_ack_timeout: float = 0  # 0: companion suggestion, with a 5-second floor
+    dm_retries: int = 3
+    dm_flood_after: int = 2
+    command_timeout: float = 45
+    conversation_limit: int = 32
+    queue_limit: int = 8
+    global_queue_limit: int = 64
+    command_workers: int = 4
+    advert_interval: float = 14400
 
     @classmethod
     def env(cls):
@@ -76,6 +87,37 @@ class Config:
         c.gap = float(os.getenv('TX_GAP', '6'))
         c.sat_alt_m = float(os.getenv('SAT_ALT_M', '200'))
         c.sat_tle_refresh_hours = float(os.getenv('SAT_TLE_REFRESH_HOURS', '12'))
+        raw_channels = os.getenv('BOT_CHANNELS', '#infobot=bare')
+        channels = []
+        for entry in raw_channels.split(','):
+            name, sep, policy = entry.strip().partition('=')
+            if not sep or not re.fullmatch(r'#[^\s,=]{1,30}',name) or len(name.encode()) > 31 or policy not in ('bare', 'bang', 'mention', 'either'):
+                raise ValueError('BOT_CHANNELS requires #name=bare|bang|mention|either entries')
+            if name in dict(channels):
+                raise ValueError('Duplicate BOT_CHANNELS name')
+            channels.append((name, policy))
+        c.channels = tuple(channels)
+        enabled = os.getenv('DM_ENABLED', 'true').lower()
+        if enabled not in ('true', 'false', '1', '0'):
+            raise ValueError('DM_ENABLED must be true or false')
+        c.dm_enabled = enabled in ('true', '1')
+        for attr, key in [('dm_ack_timeout','DM_ACK_TIMEOUT'), ('command_timeout','COMMAND_TIMEOUT'),
+                          ('advert_interval','ADVERT_INTERVAL')]:
+            setattr(c, attr, float(os.getenv(key, str(getattr(c, attr)))))
+        for attr, key in [('dm_retries','DM_RETRIES'), ('dm_flood_after','DM_FLOOD_AFTER'),
+                          ('conversation_limit','CONVERSATION_LIMIT'), ('queue_limit','QUEUE_LIMIT'),
+                          ('global_queue_limit','GLOBAL_QUEUE_LIMIT'), ('command_workers','COMMAND_WORKERS')]:
+            setattr(c, attr, int(os.getenv(key, str(getattr(c, attr)))))
+        if any(not math.isfinite(v) for v in (c.gap,c.cooldown,c.sat_alt_m,c.sat_tle_refresh_hours,c.dm_ack_timeout,c.command_timeout,c.advert_interval)):
+            raise ValueError('Numeric settings must be finite')
+        if c.advert_interval != 0 and c.advert_interval < 60:
+            raise ValueError('ADVERT_INTERVAL must be 0 (disabled) or at least 60 seconds')
+        if not 0 <= c.dm_retries <= 3 or not 1 <= c.dm_flood_after <= 4 or not 0 <= c.dm_ack_timeout <= 300:
+            raise ValueError('DM_RETRIES 0..3, DM_FLOOD_AFTER 1..4, DM_ACK_TIMEOUT 0..300 required')
+        if not 1 <= c.command_timeout <= 300 or not 1 <= c.command_workers <= 16:
+            raise ValueError('COMMAND_TIMEOUT 1..300 and COMMAND_WORKERS 1..16 required')
+        if not 1 <= c.conversation_limit <= 128 or not 1 <= c.queue_limit <= 64 or not 1 <= c.global_queue_limit <= 512:
+            raise ValueError('Conversation/queue limits outside supported ranges')
         if not 80 <= c.byte_limit <= 130 or not 1 <= c.parts <= 5 or c.gap < 3 or c.cooldown < 5:
             raise ValueError('REPLY_BYTES 80..130, REPLY_PARTS 1..5, TX_GAP >=3, USER_COOLDOWN >=5 required')
         if c.max_aircraft_age <= 0 or c.max_ship_age <= 0:
@@ -96,8 +138,15 @@ def number(value, default=None):
     except (ValueError, TypeError): return default
 
 
-def parse_command(text):
+def parse_command(text, policy='bare'):
     text = clean(text)
+    mentioned = text.lower().startswith('@[infobot]') and (len(text) == 10 or text[10] in ' :')
+    if mentioned:
+        text = text[10:].lstrip(' :')
+    bang = text.startswith('!')
+    if policy == 'mention' and not mentioned: return None
+    if policy == 'bang' and not bang: return None
+    if policy == 'either' and not (bang or mentioned): return None
     if text.lower().startswith('infobot:'): text = text[8:].strip()
     if text.startswith('!'): text = text[1:]
     if not text: return None
@@ -114,16 +163,10 @@ def local_addresses(host, port):
     return infos
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        raise ValueError('Source redirect rejected; configure its final LAN URL')
-
-
 class Sources:
     def __init__(self):
         self.health = {}
         self.cache = {}
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def get(self, label, url, ttl=15):
         now = time.monotonic()
@@ -133,11 +176,20 @@ class Sources:
             parsed = urlsplit(url)
             if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError('Expected a credential-free LAN HTTP URL')
-            local_addresses(parsed.hostname, parsed.port or (443 if parsed.scheme=='https' else 80))
-            req = urllib.request.Request(url, headers={'Accept':'application/json','Cache-Control':'no-cache','User-Agent':f'infobot/{VERSION}'})
-            with self.opener.open(req, timeout=5) as response:
+            port = parsed.port or (443 if parsed.scheme=='https' else 80)
+            infos = local_addresses(parsed.hostname, port)
+            address = ipaddress.ip_address(infos[0][4][0])
+            conn = (_PinnedHTTPS(parsed.hostname, port, address, 5, ssl.create_default_context())
+                    if parsed.scheme == 'https' else _PinnedHTTP(parsed.hostname, port, address, 5))
+            try:
+                conn.request('GET', (parsed.path or '/') + ('?' + parsed.query if parsed.query else ''),
+                             headers={'Accept':'application/json','Cache-Control':'no-cache','User-Agent':f'infobot/{VERSION}'})
+                response = conn.getresponse()
+                if response.status != 200: raise ValueError(f'Source HTTP {response.status}; redirects are not followed')
                 body = response.read(5_000_001)
                 if len(body) > 5_000_000: raise ValueError('JSON exceeds 5 MB')
+            finally:
+                conn.close()
             data = json.loads(body)
             if not isinstance(data, dict): raise ValueError('Expected a JSON object')
             self.cache[url] = (now, data)
@@ -163,6 +215,33 @@ def fresh_record(record, limit, now):
         age = (datetime.fromtimestamp(now, timezone.utc) - stamp(record['issued_at'])).total_seconds()
         return not record.get('stale') and not record.get('future_timestamp') and -300 <= age <= limit
     except (KeyError, TypeError, ValueError): return False
+
+
+def index_fresh(data, now):
+    try:
+        age = now - stamp(data['last_scan_at']).timestamp()
+        return not data.get('index_error') and not data.get('error') and -300 <= age <= 600
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def validate_source(label, data, config, now):
+    """Validate source schemas/freshness independently of display wording."""
+    if label == 'GOES':
+        if not index_fresh(data, now): raise ValueError('GOES index is not fresh')
+        counties = data.get('counties')
+        if not isinstance(counties, dict) or not counties: raise ValueError('No county forecasts')
+        if not any(isinstance(item,dict) and fresh_record(item,86400,now) and
+                   any(p.get('date') == datetime.fromtimestamp(now,LOCAL).date().isoformat()
+                       for p in item.get('periods',[])) for item in counties.values()):
+            raise ValueError('No fresh forecast periods for today')
+    elif label == 'ADSB':
+        generated = number(data.get('now'))
+        if generated is None or not -5 <= now-generated <= 120 or not isinstance(data.get('aircraft'),list):
+            raise ValueError('ADSB schema or receiver timestamp invalid')
+    elif label == 'AIS':
+        if data.get('error') or not isinstance(data.get('ships'),list) or any(not isinstance(s,dict) for s in data['ships']):
+            raise ValueError('AIS schema invalid')
 
 
 def short_weather(text):
@@ -317,7 +396,35 @@ def _pinnebog_location(contacts):
     return {'lat': lat, 'lon': lon, 'name': name, 'county': county, 'county_boundary': on_boundary}
 
 
+def dm_location(sender,contacts):
+    """Estimate DM origin from the sender end of the learned OUTBOUND route.
+
+    The companion does not expose a DM's received hop hashes. Its stored path
+    runs from us to the sender, so the LAST hop is the sender-side repeater.
+    This is a cached route estimate, never claimed as a captured incoming path.
+    """
+    contact=next((value for key,value in contacts.items()
+                  if isinstance(key,str) and key.lower()==sender.lower() and isinstance(value,dict)),None)
+    if contact is None:
+        return None, 'Location unavailable: DM sender is missing from local contacts.'
+    count=contact.get('out_path_len')
+    raw=contact.get('out_path')
+    if count==0 and raw=='':
+        return _pinnebog_location(contacts),None
+    mode=contact.get('out_path_hash_mode')
+    if not isinstance(count,int) or not 1<=count<=63 or mode not in (0,1,2):
+        return None, 'Location unavailable: no usable learned return route for this DM sender. Use wx <county>.'
+    width=2*(mode+1)
+    if not isinstance(raw,str) or len(raw)!=count*width or not re.fullmatch(r'[0-9a-fA-F]+',raw):
+        return None, 'Location unavailable: DM sender return route is malformed.'
+    location,error=_repeater_location(raw[-width:].lower(),contacts,'DM sender-side')
+    if location is not None: location['basis']='dm_return_route'
+    return location,error
+
+
 def request_location(payload, contacts):
+    if payload.get('_dm_sender'):
+        return dm_location(payload['_dm_sender'],contacts)
     route_kind = _route_kind(payload)
     if route_kind == 'direct':
         return _pinnebog_location(contacts), None
@@ -338,6 +445,10 @@ def request_location(payload, contacts):
     if not isinstance(raw, str) or not re.fullmatch(r'[0-9a-fA-F]+', raw) or len(raw) < width:
         return None, 'Location unavailable: the received path is malformed.'
     hop = raw[:width].lower()
+    return _repeater_location(hop,contacts)
+
+
+def _repeater_location(hop,contacts,label='hop-1'):
     matches = []
     for key, contact in contacts.items():
         if not isinstance(key, str) or not isinstance(contact, dict) or not key.lower().startswith(hop):
@@ -349,14 +460,14 @@ def request_location(payload, contacts):
         if kind in (2, 3):
             matches.append((key, contact))
     if len(matches) != 1:
-        return None, 'Location unavailable: hop-1 repeater is missing or ambiguous in local contacts.'
+        return None, f'Location unavailable: {label} repeater is missing or ambiguous in local contacts.'
     _, contact = matches[0]
     coords = _coordinates(contact)
     if coords is None:
-        return None, 'Location unavailable: hop-1 repeater has no advertised coordinates.'
+        return None, f'Location unavailable: {label} repeater has no advertised coordinates.'
     lat, lon = coords
     county, on_boundary = county_for_location(lat, lon)
-    name = clean(contact.get('adv_name') or 'hop 1')
+    name = clean(contact.get('adv_name') or label)
     return {'lat': lat, 'lon': lon, 'name': name, 'county': county, 'county_boundary': on_boundary}, None
 
 
@@ -381,6 +492,7 @@ def weather_counties(location):
 
 
 def weather(data, county, now, location):
+    if not index_fresh(data, now): return 'WX unavailable: GOES index is not fresh/ready.'
     if data.get('index_error'): return 'WX unavailable: GOES index error.'
     try:
         if now-stamp(data['last_scan_at']).timestamp() > 600: return 'WX unavailable: GOES index has not refreshed in 10 min.'
@@ -417,8 +529,11 @@ def weather(data, county, now, location):
 
 
 def spaceweather(data, now):
+    if not index_fresh(data, now): return 'Space weather unavailable: GOES index is not fresh/ready.'
     products = data.get('products')
     record = products.get('DAYDIS') if isinstance(products, dict) else None
+    if isinstance(record, dict) and not fresh_record(record, 18*3600, now):
+        return 'Space weather unavailable: DAYDIS forecast stale or future-dated.'
     text = record.get('text') if isinstance(record, dict) else None
     if not isinstance(text, str) or not text:
         return 'No DAYDIS forecast discussion received.'
@@ -741,7 +856,7 @@ class State:
         self.db.execute('DELETE FROM seen WHERE at < ?', (time.time()-86400,));self.db.commit()
         self.pages={};self.cooldowns={}
     def accept_reason(self, payload, sender, cooldown, now):
-        fingerprint=hashlib.sha256(json.dumps([payload.get('channel_idx'),payload.get('sender_timestamp'),payload.get('text')],ensure_ascii=False).encode()).hexdigest()
+        fingerprint=hashlib.sha256(json.dumps([payload.get('_conversation',payload.get('channel_idx')),payload.get('pubkey_prefix'),payload.get('sender_timestamp'),payload.get('text')],ensure_ascii=False).encode()).hexdigest()
         remaining=cooldown-(now-self.cooldowns.get(sender,-1e9))
         if remaining>0:return ('cooldown',remaining)
         cursor=self.db.execute('INSERT OR IGNORE INTO seen VALUES (?,?)',(fingerprint,now));self.db.commit()
@@ -801,9 +916,12 @@ class Engine:
             county=''.join(re.findall(r'[a-z]+',' '.join(args).lower())) if args else None
             if county and county not in DTX_COUNTIES:
                 return 'Use wx [county] from the 17 NWS Detroit/Pontiac counties.'
-            location,error=request_location(payload,contacts)
+            location,error=request_location(payload,contacts) if not county else (None,None)
             if error:return error
-            return weather(self.sources.get('GOES',c.goes+'/v1/weather'),county,now,location)
+            text=weather(self.sources.get('GOES',c.goes+'/v1/weather'),county,now,location)
+            if location and location.get('basis')=='dm_return_route':
+                text=f'WX near {location["name"]} (DM route estimate):\n'+text
+            return text
         if cmd=='aurora':return spaceweather(self.sources.get('GOES',c.goes+'/v1/spaceweather'),now)
         if cmd=='adsb':
             location,error=request_location(payload,contacts)
@@ -812,10 +930,13 @@ class Engine:
             location,error=request_location(payload,contacts)
             return error or vessels(self.sources.get('AIS',c.ais,ttl=0),c,now,location)
         if cmd=='status':
+            discussion='unavailable'
             try:
                 data=self.sources.get('GOES',c.goes+'/v1/status')
                 age=now-stamp(data['last_scan_at']).timestamp()
                 goes='ready' if data.get('ready') and not data.get('error') and 0<=age<600 else 'not fresh/ready'
+                record=data.get('products',{}).get('DAYDIS')
+                discussion=('fresh' if fresh_record(record,18*3600,now) else 'stale/future') if isinstance(record,dict) else 'missing'
             except Exception:goes='unavailable'
-            return f'infobot up {age_label(now-self.started)}. GOES {goes}. '+', '.join(f'{k}: {v[0]} ({age_label(max(0,now-v[1]))} ago)' for k,v in self.sources.health.items())+'. Other data sources are local only.'
+            return f'infobot up {age_label(now-self.started)}. GOES index {goes}; DAYDIS {discussion}. '+', '.join(f'{k}: {v[0]} ({age_label(max(0,now-v[1]))} ago)' for k,v in self.sources.health.items())+'.'
         raise ValueError('Unknown command')

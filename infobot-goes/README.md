@@ -1,6 +1,6 @@
 # Infobot GOES API + received weather maps — version 0.3.1
 
-Python 3.10+ standard library only. No pip, Docker, internet APIs, external
+Python 3.10+ standard library only. No pip dependency, internet APIs, external
 models, API keys, or outbound network requests. Reads local SatDump EMWIN
 text files and serves JSON on your LAN. Does not modify received files or
 connect to the MeshCore radio. System clock and installed timezone data
@@ -8,22 +8,22 @@ must be correct; neither requires an internet connection at runtime.
 
 ## Docker Compose deployment (recommended)
 
-Extract into ~/infobot-goes. Configure the UID/GID to match the reader of
+Use the repository root (`~/infobot`), which contains `compose.yaml`. Configure the UID/GID to match the reader of
 SatDump files. The Compose service reads the entire GOES root read-only,
 including EMWIN images and IMAGES, and reads the host timezone database.
 It writes nothing to either mount. No pip or apt steps are used.
 
 ```bash
-cd ~/infobot-goes
-cp .env.example .env
+cd ~/infobot
+cp .env.example .env  # first install only; preserve existing settings
 # Edit .env if needed. Check the expected UID/GID:
 id brad
 # If the previous native API service was installed, stop it to release 8097:
 sudo systemctl disable --now infobot-goes.service
 # Build once, then start (do not run the native install.sh as well):
-docker compose build
-docker compose up -d --no-build --pull never
-docker compose logs --tail=50
+docker compose build infobot-goes
+docker compose up -d --no-build --pull never infobot-goes
+docker compose logs --tail=50 infobot-goes
 ```
 
 Skip the systemctl command if that service was never installed. If your user
@@ -39,7 +39,7 @@ air-gapped host, build on a compatible Linux architecture elsewhere and use:
 docker save infobot-goes:0.3.1 -o infobot-goes-image.tar
 # Transfer image tar + project to the offline host, then:
 docker load -i infobot-goes-image.tar
-docker compose up -d --no-build --pull never
+docker compose up -d --no-build --pull never infobot-goes
 ```
 
 No application code makes outbound requests. The Docker bridge is ordinary
@@ -118,8 +118,8 @@ for (const map of catalog.maps) {
 
 Product image_url paths are relative to the API server root; prepend your
 proxy prefix as above. Keep that proxy on your LAN for fully offline website
-use; a public website can proxy it too, but reaching the public website itself
-naturally depends on the client's connectivity.
+use; a public website would need a deliberately managed proxy and access policy.
+The service itself has no authentication; keep its listener on a trusted LAN.
 
 ## Optional native install on Euclid
 
@@ -192,6 +192,9 @@ delivery_at is from the EMWIN filename, not a local reception measurement.
 
 ## API contract
 
+- GET /healthz: HTTP 200 only when the text index is ready, has products,
+  has scanned within ten minutes, and neither index reports an error; map
+  indexing must also be ready and recent. Otherwise HTTP 503.
 - GET /v1/status: index readiness, latest completed scan, product filenames
   and issue times, scan duration, parse errors. HTTP 200 means the HTTP
   service responds; inspect ready and error for index health.
@@ -247,12 +250,13 @@ than claiming old warning files are currently active.
 
 ## Validation and rollout
 
-Seventeen unit tests cover the supplied bulletin structure with compact
+The unit tests cover the supplied bulletin structure with compact
 fixtures transcribed from the Nov 7 sample; they are not a replay of the
 entire archive. Also smoke-tested HTTP with temporary local fixture files.
 Live Euclid installation and its actual archive still need verification.
-Docker is unavailable in the development environment; the container build
-and Compose deployment were not executed here. HTTP image streaming, CORS,
+Run `python -B run_tests.py` from the repository root to run both suites.
+Container build checks are also defined in CI; physical deployment needs
+separate verification. HTTP image streaming, CORS,
 ETag, HEAD and the gallery were exercised using a native test server.
 
 The full project scope remains:

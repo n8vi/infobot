@@ -4,7 +4,7 @@ HTTP fetch command, and CelesTrak element refresh plus local SGP4 predictions;
 ping is bounded in core.py.
 """
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import http.client
 import ipaddress
 import json
@@ -15,7 +15,7 @@ import secrets
 import socket
 import ssl
 import struct
-import time
+import tempfile
 from urllib.parse import quote, urljoin, urlsplit
 import urllib.request
 from zoneinfo import ZoneInfo
@@ -159,7 +159,7 @@ def fetch_one_packet(url, byte_limit):
             try:
                 conn.request('GET', path, headers={
                     'Host': host_header,
-                    'User-Agent': 'infobot/0.5.2',
+                    'User-Agent': 'infobot/0.6.0',
                     'Accept': '*/*',
                     'Accept-Encoding': 'identity',
                     'Connection': 'close',
@@ -212,9 +212,14 @@ class SatellitePasses:
 
     def _write_cache(self, payload):
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.cache_path.with_suffix('.tmp')
-        temporary.write_text(json.dumps(payload, separators=(',', ':')))
-        os.replace(temporary, self.cache_path)
+        with tempfile.NamedTemporaryFile(mode='w', dir=self.cache_path.parent, prefix='elements-', suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(json.dumps(payload, separators=(',', ':')))
+                stream.flush()
+                os.replace(temporary, self.cache_path)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def _refresh(self, cached, now):
         if now - self.last_attempt < 1800:
@@ -223,7 +228,7 @@ class SatellitePasses:
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _CelestrakRedirect())
             request = urllib.request.Request(CELESTRAK_URL, headers={
-                'Accept': 'application/json', 'User-Agent': 'infobot/0.5.2',
+                'Accept': 'application/json', 'User-Agent': 'infobot/0.6.0',
             })
             with opener.open(request, timeout=8) as response:
                 raw = response.read(2_000_001)
@@ -314,63 +319,70 @@ class SatellitePasses:
         return stale + '\n'.join(output)
 
     def _visible_next_hour(self, ts, satellites, observer, now):
-        from skyfield.api import wgs84
-        start = datetime.fromtimestamp(now, timezone.utc)
-        step = 30
-        samples = [start + timedelta(seconds=step*i) for i in range(121)]
-        times = ts.from_datetimes(samples)
         rows = []
         for name, sat_id, sat in satellites:
             try:
-                altitudes = (sat - observer).at(times).altaz()[0].degrees
-            except Exception:
+                result = self._pass(sat, observer, ts, now)
+            except (ValueError, ArithmeticError):
                 continue
-            current = float(altitudes[0])
-            if current >= 0:
-                rows.append((0, -current, f'{name} up now {current:.0f} deg'))
-                continue
-            for i in range(1, len(samples)):
-                previous, following = float(altitudes[i-1]), float(altitudes[i])
-                if previous < 0 <= following:
-                    fraction = -previous / (following-previous) if following != previous else 0
-                    rise = samples[i-1] + timedelta(seconds=step*fraction)
-                    if rise <= start + timedelta(hours=1):
-                        peak = max(float(v) for v in altitudes[i:])
-                        rows.append((1, rise.timestamp(), f'{name} rises {rise.astimezone(LOCAL):%H:%M} ET (peak {peak:.0f} deg)'))
-                    break
+            if result['up'] or (result['rise'] is not None and result['rise'] <= now + 3600):
+                rows.append((0 if result['up'] else 1, result['rise'] or now,
+                             self._format_pass(name, result)))
         if not rows:
             return 'No amateur satellites are up or rising in the next hour.'
         rows.sort(key=lambda row: (row[0], row[1]))
         return 'Amateur satellites up / rising within 1h:\n' + '\n'.join(row[2] for row in rows)
 
     @staticmethod
-    def _next_pass(name, sat_id, sat, observer, ts, t_now):
-        current_alt = float((sat - observer).at(t_now).altaz()[0].degrees)
-        t_end = ts.from_datetime(t_now.utc_datetime().replace(tzinfo=timezone.utc) + timedelta(hours=48))
-        times, events = sat.find_events(observer, t_now, t_end, altitude_degrees=0.0)
-        event_data = [(time_item.utc_datetime().replace(tzinfo=timezone.utc), int(event))
-                      for time_item, event in zip(times, events)]
-        label = f'{name} (NORAD {sat_id})'
-        if current_alt >= 0:
-            culmination = next((when for when,event in event_data if event == 1), None)
-            setting = next((when for when,event in event_data if event == 2), None)
-            if setting is None:
-                return f'{label}: up now at {current_alt:.0f} deg; no set in 48h.'
-            peak = current_alt
-            if culmination:
-                peak = float((sat - observer).at(ts.from_datetime(culmination)).altaz()[0].degrees)
-            return f'{label}: up now; sets {setting.astimezone(LOCAL):%m/%d %H:%M} ET; peak {peak:.0f} deg.'
-        rise_index = next((i for i,(_,event) in enumerate(event_data) if event == 0), None)
-        if rise_index is None:
+    def _pass(sat, observer, ts, now):
+        """Find the complete current/next pass, including its original rise.
+
+        Search backwards for an underway pass rather than treating the current
+        elevation as its peak. Unbounded/geostationary arcs remain explicit.
+        """
+        def at(stamp):
+            return (sat-observer).at(ts.from_datetime(datetime.fromtimestamp(stamp, timezone.utc))).altaz()
+        up = float(at(now)[0].degrees) >= 0
+        start = now - 48*3600 if up else now
+        end = now + 48*3600
+        times, events = sat.find_events(observer,
+            ts.from_datetime(datetime.fromtimestamp(start, timezone.utc)),
+            ts.from_datetime(datetime.fromtimestamp(end, timezone.utc)), altitude_degrees=0.0)
+        points = [(t.utc_datetime().timestamp(), int(e)) for t,e in zip(times,events)]
+        rises = [t for t,e in points if e == 0 and (t <= now if up else t >= now)]
+        rise = (max(rises) if up else min(rises)) if rises else None
+        setting = next((t for t,e in points if e == 2 and t > (now if up else rise if rise is not None else end)), None)
+        peaks = [t for t,e in points if e == 1 and (rise if rise is not None else start) <= t <= (setting if setting is not None else end)]
+        peak = (max((float(at(t)[0].degrees) for t in peaks), default=None)
+                if rise is not None and setting is not None else None)
+        return {'up':up, 'rise':rise, 'set':setting,
+                'rise_direction': compass(float(at(rise)[1].degrees)) if rise is not None else None,
+                'set_direction': compass(float(at(setting)[1].degrees)) if setting is not None else None,
+                'peak':peak}
+
+    @staticmethod
+    def _format_pass(label, result):
+        if not result['up'] and result['rise'] is None:
             return f'{label}: no rise in the next 48h.'
-        rise = event_data[rise_index][0]
-        culmination = next((when for when,event in event_data[rise_index+1:] if event == 1), None)
-        setting = next((when for when,event in event_data[rise_index+1:] if event == 2), None)
-        peak = float((sat - observer).at(ts.from_datetime(culmination)).altaz()[0].degrees) if culmination else None
-        result = f'{label}: rises {rise.astimezone(LOCAL):%m/%d %H:%M} ET'
-        if peak is not None: result += f'; peak {peak:.0f} deg'
-        if setting is not None: result += f'; sets {setting.astimezone(LOCAL):%H:%M} ET'
-        return result + '.'
+        prefix = f'{label}: ' + ('up now; ' if result['up'] else '')
+        def clock(value):
+            return datetime.fromtimestamp(value, LOCAL).strftime('%m/%d %H:%M')
+        rise = (f'rises {clock(result["rise"])} {result["rise_direction"]}'
+                if result['rise'] is not None else 'rise not found in previous 48h')
+        peak = f'peak {result["peak"]:.0f} deg' if result['peak'] is not None else 'peak unavailable'
+        setting = (f'sets {clock(result["set"])} {result["set_direction"]}'
+                   if result['set'] is not None else 'no set in next 48h')
+        return prefix + '; '.join((rise,peak,setting)) + ' ET.'
+
+    @staticmethod
+    def _next_pass(name, sat_id, sat, observer, ts, t_now):
+        result = SatellitePasses._pass(sat,observer,ts,t_now.utc_datetime().timestamp())
+        return SatellitePasses._format_pass(f'{name} (NORAD {sat_id})',result)
+
+
+def compass(azimuth):
+    directions = ('N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW')
+    return directions[int((azimuth % 360 + 11.25) // 22.5) % 16]
 
 
 def _number(value):

@@ -1,4 +1,3 @@
-import json
 import os
 from pathlib import Path
 import tempfile
@@ -92,7 +91,7 @@ class Tests(unittest.TestCase):
         _, data = self.index().respond('/v1/weather', {}, datetime(2026, 11, 8, 5, tzinfo=UTC))
         self.assertEqual(data['requested_dates'], ['2026-11-08', '2026-11-09'])
         self.assertEqual(data['counties']['huron']['periods'][0]['label'], 'SUNDAY')
-        self.assertTrue(data['stale'])
+        self.assertFalse(data['stale'])  # about 20 hours old; 24-hour policy
 
     def test_expired_does_not_relabel(self):
         _, data = self.index().respond('/v1/weather', {}, datetime(2026, 11, 20, tzinfo=UTC))
@@ -104,6 +103,18 @@ class Tests(unittest.TestCase):
         _, data = i.respond('/v1/weather', {'county': ['huron']})
         self.assertEqual(list(data['counties']), ['huron'])
         self.assertEqual(i.respond('/v1/weather', {'county': ['bogus']})[0], 400)
+
+    def test_health_requires_index_readiness_and_recent_scan(self):
+        i=Index('/missing')
+        self.assertEqual(i.respond('/healthz',{})[0],503)
+        i=self.index()
+        now=datetime(2026,11,7,20,tzinfo=UTC)
+        i.status.update(ready=True,last_scan_at=now.isoformat())
+        self.assertEqual(i.respond('/healthz',{},now)[0],200)
+        i.status['error']='disk failed'
+        self.assertEqual(i.respond('/healthz',{},now)[0],503)
+        i.status.update(error=None,last_scan_at='2000-01-01T00:00:00+00:00')
+        self.assertEqual(i.respond('/healthz',{},now)[0],503)
 
     def test_space_threshold_not_live_kp(self):
         issued, data = parse_space(ALERT)

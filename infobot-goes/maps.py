@@ -1,9 +1,9 @@
 """Local received raster catalog. No maps, tiles, or metadata fetched online."""
 import hashlib
-import mimetypes
 import os
 from pathlib import Path
 import re
+import stat
 import threading
 import time
 from datetime import datetime, timezone
@@ -48,7 +48,7 @@ class MapIndex:
             raise error
         for branch in ('EMWIN', 'IMAGES'):
             root = self.root / branch
-            if not root.is_dir():
+            if root.is_symlink() or not root.is_dir():
                 continue
             for directory, dirs, names in os.walk(root, onerror=onerror):
                 # Text alone contains nearly half a million files on Euclid.
@@ -124,14 +124,26 @@ class MapIndex:
         with self.lock:
             item = dict(self.items.get(ident, {}))
         if not item: raise FileNotFoundError('Unknown image ID')
-        path = (self.root / item['relative_path']).resolve()
-        if not path.is_relative_to(self.root) or path.is_symlink(): raise FileNotFoundError('Invalid image path')
-        stream = path.open('rb')
+        relative = Path(item['relative_path'])
+        if relative.is_absolute() or any(part in ('..','.') for part in relative.parts):
+            raise FileNotFoundError('Invalid image path')
+        directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in relative.parts[:-1]:
+                child = os.open(part,os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,dir_fd=directory)
+                os.close(directory)
+                directory = child
+            descriptor = os.open(relative.name,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,dir_fd=directory)
+        finally:
+            os.close(directory)
+        stream = os.fdopen(descriptor,'rb')
         st = os.fstat(stream.fileno())
-        if not image_type(stream.read(16)) or st.st_size > 128*1024*1024:
+        mime = image_type(stream.read(16)) if stat.S_ISREG(st.st_mode) else None
+        if not mime or st.st_size > 128*1024*1024:
             stream.close()
             raise FileNotFoundError('Image is unavailable')
         stream.seek(0)
         item['bytes'] = st.st_size
-        item['etag'] = '"' + hashlib.sha256(f'{path}:{st.st_mtime_ns}:{st.st_size}'.encode()).hexdigest() + '"'
+        item['mime_type'] = mime
+        item['etag'] = '"' + hashlib.sha256(f'{relative}:{st.st_mtime_ns}:{st.st_size}'.encode()).hexdigest() + '"'
         return stream, item
