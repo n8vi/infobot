@@ -55,14 +55,31 @@ class Transmitter:
         logging.info('RX PATH_UPDATE event: peer=%r pending=%r',
                      event.payload.get('public_key'),self.receipt_expectations())
 
-    def log_rx_packet(self,fields):
-        kind=fields.get('payload_type')
-        if kind not in (3,8): return  # public ACK or encrypted PATH return
+    @staticmethod
+    def packet_payload(fields):
         payload=fields.get('pkt_payload',b'')
         if isinstance(payload,str):
             try: payload=bytes.fromhex(payload)
             except ValueError: payload=b''
         if not isinstance(payload,(bytes,bytearray)): payload=b''
+        return bytes(payload)
+
+    def receive_raw_ack(self,fields):
+        if fields.get('payload_type')!=3: return False
+        payload=self.packet_payload(fields)
+        if len(payload)<4: return False
+        # MeshCore correlates receipts on the first four wire-order bytes.
+        # Optional extension bytes are not part of the receipt identifier.
+        code=payload[:4].hex()
+        matched=False
+        for item in list(self.pending_receipts.values()):
+            matched=item['observe_ack'](code,'raw RF ACK') or matched
+        return matched
+
+    def log_rx_packet(self,fields):
+        kind=fields.get('payload_type')
+        if kind not in (3,8): return  # public ACK or encrypted PATH return
+        payload=self.packet_payload(fields)
         if kind==3:
             logging.info('RX raw ACK packet: code=%r payload_hex=%s route=%r hops=%r hash_bytes=%r path=%r pending=%r',
                          payload[:4].hex() if len(payload)>=4 else None,payload.hex(),
@@ -108,24 +125,28 @@ class Transmitter:
 
     async def dm(self, key, text):
         from meshcore import EventType
-        # Keep a message identity stable across retries, and distinguish even
-        # identical consecutive pages within the same wall-clock second.
-        identity = (key,text)
+        # Keep identity stable across retries. The receipt hash excludes the
+        # recipient, so identical text needs distinct timestamps even across
+        # different DM destinations in the same wall-clock second.
+        identity = text
         timestamp = max(int(time.time()), self.timestamps.get(identity,0)+1)
         self.timestamps[identity] = timestamp
         if len(self.timestamps)>512: self.timestamps.pop(next(iter(self.timestamps)))
         acked = asyncio.Event()
-        expected, early = set(), set()
+        expected, early = set(), {}
         tracking=object()
-        self.pending_receipts[tracking]=dict(peer=key,timestamp=timestamp,attempt=0,
-                                            awaiting_send_result=True,expected=expected)
-        def receipt(event):
-            code = event.attributes.get('code',event.payload.get('code'))
+        def observe_ack(code,source):
             if code in expected:
                 if not acked.is_set():
-                    logging.info('TX DM receipt confirmed from %s (ack=%s): %r',key,code,text)
+                    logging.info('TX DM receipt confirmed from %s (ack=%s, source=%s): %r',key,code,source,text)
                 acked.set()
-            elif code: early.add(code)
+                return True
+            elif code: early[code]=source
+            return False
+        self.pending_receipts[tracking]=dict(peer=key,timestamp=timestamp,attempt=0,
+                                            awaiting_send_result=True,expected=expected,observe_ack=observe_ack)
+        def receipt(event):
+            observe_ack(event.attributes.get('code',event.payload.get('code')),'companion receipt')
         subscription = self.mc.subscribe(EventType.ACK,receipt)
         flood = False
         try:
@@ -152,8 +173,7 @@ class Transmitter:
                 logging.info('TX DM accepted by radio for %s (attempt %s/%s, route=%s, ack=%s; awaiting receipt): %r',
                              key,attempt+1,self.config.dm_retries+1,'flood' if flood else 'direct',code,text)
                 if code in early and not acked.is_set():
-                    logging.info('TX DM receipt confirmed from %s (ack=%s): %r',key,code,text)
-                    acked.set()
+                    observe_ack(code,early[code])
                 suggested = result.payload.get('suggested_timeout',0)/1000*1.2
                 timeout = self.config.dm_ack_timeout or max(5,min(300,suggested))
                 logging.info('DM ACK wait: peer=%s timestamp=%s attempt=%s expected=%r suggested_timeout_ms=%r timeout=%gs',

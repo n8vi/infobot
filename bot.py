@@ -148,7 +148,9 @@ class Runner:
             if fields.get(key) is None:
                 fields[key]=value
         self.rx_logs.append((time.monotonic(),fields))
-        if transmitter is not None: transmitter.log_rx_packet(fields)
+        if transmitter is not None:
+            transmitter.log_rx_packet(fields)
+            transmitter.receive_raw_ack(fields)
 
     def attach_rx_metadata(self,payload):
         now=time.monotonic()

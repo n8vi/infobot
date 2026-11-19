@@ -187,13 +187,15 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                         sent.append(('dm',key,attempt,text,body[3:7]))
                         code=len(sent).to_bytes(4,'little')
                         await frame(b'\x06'+bytes([int(attempt>0)])+code+(10).to_bytes(4,'little'))
-                        # Raw RF ACKs must be visible but must not confirm delivery
-                        # without a matching companion receipt notification.
-                        await frame(b'\x88\x00\xba'+b'\x0e\x00'+code)
+                        # First destination misses its first receipt, then gets
+                        # only a raw RF ACK (OpenHop without a 0x82 push). The
+                        # second destination uses the normal companion receipt.
+                        raw_code=code if key==keys[0][:6] and attempt>0 else b'\xff'*4
+                        await frame(b'\x88\x00\xba'+b'\x0e\x00'+raw_code+b'\x00\x47')
                         await frame(b'\x88\x00\xba'+b'\x21\x00'+bytes(8))
                         await frame(b'\x82'+b'\xff'*4+(5).to_bytes(4,'little'))
                         await frame(b'\x81'+next(k for k in keys if k[:6]==key))
-                        if key!=keys[0][:6] or attempt>0:
+                        if key!=keys[0][:6]:
                             await frame(b'\x82'+code+(5).to_bytes(4,'little'))
                         check()
                     elif cmd==13:
@@ -233,6 +235,8 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any('flood fallback' in line for line in logs.output))
                 self.assertTrue(any("RX ACK event: code='ffffffff'" in line for line in logs.output))
                 self.assertTrue(any('RX raw ACK packet:' in line for line in logs.output))
+                self.assertTrue(any('source=raw RF ACK' in line for line in logs.output))
+                self.assertTrue(any('source=companion receipt' in line for line in logs.output))
                 self.assertTrue(any('RX encrypted PATH packet' in line for line in logs.output))
                 self.assertTrue(any('RX PATH_UPDATE event:' in line for line in logs.output))
                 b=next(x for x in sent if x[0]=='dm' and x[1]==keys[1][:6])

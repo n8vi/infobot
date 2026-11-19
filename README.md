@@ -114,7 +114,14 @@ DM settings (all optional):
 
 Retries retain the text and original timestamp and increment the protocol
 attempt field. A matching late receipt from an earlier attempt is accepted;
-unrelated receipts are ignored. The bot subscribes before sending so an early
+unrelated receipts are ignored. A raw RF ACK can also confirm a pending DM
+when its first four wire-order bytes exactly match an expected receipt code.
+This supports OpenHop instances that forward RX packets without a companion
+receipt notification. Optional ACK extension bytes are ignored, following
+MeshCore's four-byte receipt matching. Logs identify confirmation as
+`source=raw RF ACK` or `source=companion receipt`. Identical reply text uses
+separate timestamps across DM recipients, because the receipt hash does not
+include the recipient key; this prevents one receipt completing two replies. The bot subscribes before sending so an early
 receipt cannot be missed. A missing receipt can still mean the message arrived
 and its receipt was lost; duplicate delivery remains possible.
 
@@ -244,7 +251,8 @@ Receipt diagnostics are also logged at INFO without additional configuration:
   An early event can show an empty expected list while the send result is pending;
   the existing receipt-confirmed line records a later successful match.
 - `RX raw ACK packet`: an RF ACK heard in the radio RX log, its wire-order code,
-  payload hex and route metadata. Hearing it alone does not confirm delivery.
+  payload hex and route metadata. Its first four bytes must match an active
+  expected code before it can confirm delivery; unrelated raw ACKs are ignored.
 - `RX encrypted PATH packet`: a path return was heard; encrypted contents cannot
   be assumed to contain a matching receipt.
 - `RX PATH_UPDATE event`: the companion reports a changed contact route.
@@ -254,7 +262,9 @@ Receipt diagnostics are also logged at INFO without additional configuration:
 Raw packets are available only when the companion supplies RX log events.
 A raw ACK without a companion receipt event points to a different failure
 stage than a receipt event whose code differs from the pending codes. These
-observations do not alter receipt matching, retry counts, or timeout settings.
+diagnostic logs do not change retry counts or timeout settings. The raw-ACK
+fallback uses the same active expected-code set as companion receipts; neither
+a path update nor an encrypted path packet is accepted as confirmation.
 
 ## Network and containers
 

@@ -74,7 +74,7 @@ class ReceiptDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any('matching_peers=[\''+KEY+'\']' in line for line in logs.output))
         self.assertFalse(self.tx.pending_receipts)
 
-    async def test_raw_ack_and_encrypted_path_are_observations_only(self):
+    async def test_idle_raw_ack_and_encrypted_path_are_observations_only(self):
         runner=object.__new__(Runner);runner.rx_logs=deque(maxlen=128)
         # FLOOD ACK header, one 2-byte hop, four-byte ACK plus extension.
         ack=b'\x0d\x41\xaa\xbb\x12\x34\x56\x78\x99'
