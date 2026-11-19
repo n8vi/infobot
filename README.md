@@ -242,6 +242,15 @@ acceptance from unconfirmed delivery; DM logs include attempts, route, receipt
 confirmation, timeouts, and flood fallback. View them with
 `docker compose logs -f --tail=50 infobot`.
 
+Each private-message event is logged as `RX DM event before admission` before
+checking DM enablement, type, timestamp, text, sender or command. This includes
+the sender prefix, message type, sender and host timestamps, message age, text
+and reported path metadata. Rejected events get a `DROP DM event` with the
+specific reason; cooldown, duplicate and capacity drops are also logged.
+The later `RX ('dm', ...)` line means a request was actually admitted to a queue.
+If OpenHop observes a packet but no pre-admission DM event appears, investigate
+its decryption, queue and companion forwarding rather than bot admission.
+
 Receipt diagnostics are also logged at INFO without additional configuration:
 
 - `DM ACK wait`: expected codes (including previous attempts), message timestamp,

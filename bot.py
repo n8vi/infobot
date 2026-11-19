@@ -292,6 +292,37 @@ class Runner:
                  if isinstance(key,str) and re.fullmatch(r'[0-9a-fA-F]{64}',key) and key.lower().startswith(prefix.lower())}
         return next(iter(matches)) if len(matches)==1 else None
 
+    def inspect_dm_admission(self,payload,contacts,now):
+        fields=payload if isinstance(payload,dict) else {}
+        timestamp=number(fields.get('sender_timestamp'))
+        age=now-timestamp if timestamp is not None else None
+        logging.info('RX DM event before admission: sender_prefix=%r txt_type=%r sender_timestamp=%r host_timestamp=%.3f age_s=%r text=%r path_len=%r path_hash_mode=%r',
+                     fields.get('pubkey_prefix'),fields.get('txt_type'),fields.get('sender_timestamp'),
+                     now,age,fields.get('text'),fields.get('path_len'),fields.get('path_hash_mode'))
+        def reject(reason):
+            logging.info('DROP DM event: %s; sender_prefix=%r text=%r',
+                         reason,fields.get('pubkey_prefix'),fields.get('text'))
+            return None,reason
+        if not isinstance(payload,dict): return reject('invalid event payload (expected an object)')
+        if not self.config.dm_enabled: return reject('DMs disabled by configuration')
+        if payload.get('txt_type',0)!=0: return reject('unsupported DM message type (ordinary text required)')
+        if timestamp is None: return reject('missing or invalid sender timestamp')
+        if age < -30: return reject(f'sender timestamp is {abs(age):.1f}s in the future (limit 30s)')
+        if age > 120: return reject(f'message is {age:.1f}s old (limit 120s)')
+        text=payload.get('text')
+        if not isinstance(text,str): return reject('missing or invalid text')
+        if len(text.encode())>512: return reject('message exceeds 512-byte limit')
+        prefix=payload.get('pubkey_prefix','')
+        if not isinstance(prefix,str) or not re.fullmatch(r'[0-9a-fA-F]{12}',prefix):
+            return reject('invalid sender public-key prefix (expected 6 bytes as hex)')
+        key=self.dm_contact(payload,contacts)
+        if key is None:
+            matches=sum(isinstance(k,str) and bool(re.fullmatch(r'[0-9a-fA-F]{64}',k)) and k.lower().startswith(prefix.lower()) for k in contacts)
+            return reject('sender is unknown in local contacts' if not matches else f'sender prefix is ambiguous ({matches} matching contacts)')
+        parsed=parse_command(text)
+        if parsed is None: return reject('not a supported command')
+        return (key,parsed),None
+
     async def advertise_if_due(self,transmitter):
         if not self.config.advert_interval or self.stop.is_set() or time.monotonic()<self.next_advert:
             return
@@ -330,8 +361,11 @@ class Runner:
                          mc.subscribe(EventType.PATH_UPDATE,transmitter.log_path_update)]
             mc.subscribe(EventType.DISCONNECTED,lambda event:dead.set())
             def receive(event):
-                payload=dict(event.payload)
                 now=time.time()
+                if event.type==EventType.CONTACT_MSG_RECV and not isinstance(event.payload,dict):
+                    self.inspect_dm_admission(event.payload,{},now)
+                    return
+                payload=dict(event.payload)
                 if event.type==EventType.CHANNEL_MSG_RECV:
                     slot=payload.get('channel_idx')
                     if slot not in rules: return
@@ -344,13 +378,9 @@ class Runner:
                     sender,(cmd,args)=parsed
                     conversation=('channel',slot)
                 else:
-                    if not self.config.dm_enabled or payload.get('txt_type',0)!=0: return
-                    timestamp=number(payload.get('sender_timestamp'))
-                    text=payload.get('text')
-                    if timestamp is None or not -30<=now-timestamp<=120 or not isinstance(text,str) or len(text.encode())>512: return
-                    key=self.dm_contact(payload,contact_snapshot(mc))
-                    parsed=parse_command(text)
-                    if key is None or parsed is None: return
+                    admitted,_reason=self.inspect_dm_admission(payload,contact_snapshot(mc),now)
+                    if admitted is None: return
+                    key,parsed=admitted
                     sender=key
                     cmd,args=parsed
                     conversation=('dm',key)
@@ -363,7 +393,10 @@ class Runner:
                     if len(conversations)>=self.config.conversation_limit:
                         idle=next((k for k,(q,t) in conversations.items()
                                    if q.empty() and self.worker_health.get(k,{}).get('state')=='idle'),None)
-                        if idle is None: return
+                        if idle is None:
+                            logging.warning('DROP request in %s from %s: conversation limit reached (%s); text=%r',
+                                            conversation,sender,self.config.conversation_limit,payload.get('text'))
+                            return
                         retired=conversations.pop(idle)[1]
                         retired.cancel()
                         self.retired_tasks.add(retired)
