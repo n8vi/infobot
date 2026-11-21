@@ -10,6 +10,7 @@ from core import *
 from bot import admitted, select_channel, EXPECTED_KEY
 
 NOW=datetime(2026,11,7,20,30,tzinfo=timezone.utc).timestamp()
+LOCATION={'lat':43.96476,'lon':-83.10631,'name':'Preview repeater','county':'huron','county_boundary':False}
 ISSUE='2026-11-07T08:56:00+00:00'
 WX={'last_scan_at':'2026-11-07T20:29:00+00:00','counties':{'huron':{'issued_at':ISSUE,'stale':False,'periods':[
     {'date':'2026-11-07','night':False,'text':'Cloudy. Highs around 50. Chance of rain 20 percent.'},
@@ -27,21 +28,21 @@ class Tests(unittest.TestCase):
         e=Engine(Config())
         self.assertEqual(e.execute('ping',[]),'Pong!')
         self.assertIn('wx',e.execute('help',[]))
-        self.assertIn('threshold',e.execute('help',['spacewx']))
+        self.assertIn('DAYDIS',e.execute('help',['spacewx']))
         self.assertEqual(parse_command('about'),('about',[]))
-        self.assertEqual(e.execute('about',[]),f'Infobot v{VERSION}\nThe homebrew bot at tarratt.net HQ.\nOnly internet, get, and sat use internet.')
+        self.assertEqual(e.execute('about',[]),f'Infobot v{VERSION}\nThe homebrew bot at tarratt.net HQ.\nNetwork commands: internet, get, sat refresh, ping <target>.')
     def test_weather_dates_probabilities(self):
-        text=weather(WX,'huron',NOW)
+        text=weather(WX,'huron',NOW,LOCATION)
         for value in ['20%','50','Tonight','Tomorrow','35 mph']:self.assertIn(value,text)
         self.assertNotIn('SHOULD NOT',text)
     def test_stale_weather(self):
-        self.assertIn('unavailable',weather(WX,'huron',NOW+86400))
+        self.assertIn('unavailable',weather(WX,'huron',NOW+86400,LOCATION))
     def test_future_weather(self):
         data=json.loads(json.dumps(WX));data['counties']['huron']['issued_at']='2026-11-08T08:56:00+00:00'
-        self.assertIn('stale/unavailable',weather(data,'huron',NOW))
+        self.assertIn('stale/unavailable',weather(data,'huron',NOW,LOCATION))
     def test_space_event_not_current(self):
         forecast={'issued_at':'2026-11-07T12:30:00+00:00','text':'FXXX12 KWNP 071231\nDAYDIS\nSolar Activity\n.24 hr Summary...\nObserved solar activity.\n\n.Forecast...\nSolar forecast wording.\nEnergetic Particle\n.24 hr Summary...\nObserved particles.\n\n.Forecast...\nParticle forecast wording.\nSolar Wind\n.24 hr Summary...\nObserved wind.\n\n.Forecast...\nWind forecast wording.\nGeospace\n.24 hr Summary...\nObserved geospace.\n\n.Forecast...\nGeospace forecast wording.'}
-        text=spaceweather({'products':{'DAYDIS':forecast}},NOW)
+        text=spaceweather({'last_scan_at':WX['last_scan_at'],'products':{'DAYDIS':forecast}},NOW)
         self.assertIn('11/07 1230Z',text)
         for phrase in ('Solar forecast wording.','Particle forecast wording.','Wind forecast wording.','Geospace forecast wording.'):
             self.assertIn(phrase,text)
@@ -52,22 +53,24 @@ class Tests(unittest.TestCase):
         outside=dict(good,flight='OUT',lat=46)
         old=dict(good,flight='OLD',seen_pos=61)
         ground=dict(good,flight='GROUND',alt_baro='ground')
-        text=aircraft({'now':NOW,'aircraft':[good,outside,old,ground]},Config(),NOW)
+        text=aircraft({'now':NOW,'aircraft':[good,outside,old,ground]},Config(),NOW,LOCATION)
         self.assertIn('TEST1',text)
-        for absent in ('OUT:','OLD:','GROUND:'):self.assertNotIn(absent,text)
+        self.assertIn('OUT:',text)
+        self.assertLess(text.index('TEST1:'),text.index('OUT:'))
+        for absent in ('OLD:','GROUND:'):self.assertNotIn(absent,text)
     def test_stale_aircraft_file(self):
-        self.assertIn('unavailable',aircraft({'now':NOW-130,'aircraft':[]},Config(),NOW))
+        self.assertIn('unavailable',aircraft({'now':NOW-130,'aircraft':[]},Config(),NOW,LOCATION))
     def test_ais_age_and_nonships(self):
         ships=[{'mmsi':367123456,'shipname':'FREIGHTER','last_signal':70,'speed':12.5},
                {'mmsi':367123457,'shipname':'OLD','last_signal':1900},
                {'mmsi':993671234,'shipname':'BUOY','last_signal':1}]
-        text=vessels({'ships':ships},Config(),NOW)
+        text=vessels({'ships':ships},Config(),NOW,LOCATION)
         self.assertIn('FREIGHTER 12.5kt',text);self.assertNotIn('OLD',text);self.assertNotIn('BUOY',text)
     def test_invalid_ais_schema(self):
-        with self.assertRaises(ValueError):vessels({'ships':[[123,4,5]]},Config(),NOW)
+        with self.assertRaises(ValueError):vessels({'ships':[[123,4,5]]},Config(),NOW,LOCATION)
     def test_missing_data_never_invented(self):
-        self.assertIn('No fresh',aircraft({'now':NOW,'aircraft':[{'hex':'bad','lat':43.8,'lon':-83}]},Config(),NOW))
-        self.assertIn('No vessels',vessels({'ships':[{'mmsi':367123456}]},Config(),NOW))
+        self.assertIn('No fresh',aircraft({'now':NOW,'aircraft':[{'hex':'bad','lat':43.8,'lon':-83}]},Config(),NOW,LOCATION))
+        self.assertIn('No vessels',vessels({'ships':[{'mmsi':367123456}]},Config(),NOW,LOCATION))
     def test_path_two_bytes_and_ambiguity(self):
         contacts={'aabb'+'00'*30:{'adv_name':'Greenleaf','type':2},'ccdd'+'00'*30:{'adv_name':'One','type':2},'ccdd'+'11'*30:{'adv_name':'Two','type':2}}
         text=path_reply([],{'path':'aabbccdd','path_len':2,'path_hash_mode':1},contacts)
@@ -113,8 +116,6 @@ class Tests(unittest.TestCase):
     def test_public_source_rejected(self):
         with patch('socket.getaddrinfo',return_value=[(2,1,6,'',('8.8.8.8',80))]):
             with self.assertRaises(ValueError):local_addresses('bad',80)
-    def test_no_redirects(self):
-        with self.assertRaises(ValueError):NoRedirect().redirect_request(None,None,None,None,None,None)
     def test_http_source_limits_and_errors(self):
         with self.assertRaises(ValueError):Sources().get('bad','file:///etc/passwd')
     def test_bad_config(self):

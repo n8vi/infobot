@@ -48,6 +48,20 @@ class MapTests(unittest.TestCase):
             i=MapIndex(root);i.scan()
             self.assertEqual(i.catalog({})['maps'],[])
 
+    def test_replaced_file_and_parent_symlinks_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);branch=root/'EMWIN';branch.mkdir()
+            image=branch/'image.png';image.write_bytes(PNG);os.utime(image,(1,1))
+            index=MapIndex(root);index.scan()
+            ident=index.catalog({})['maps'][0]['id']
+            other=root/'other.png';other.write_bytes(PNG)
+            image.unlink();image.symlink_to(other)
+            with self.assertRaises(OSError):index.open_image(ident)
+            image.unlink();image.write_bytes(PNG)
+            branch.rename(root/'saved')
+            branch.symlink_to(root/'saved',target_is_directory=True)
+            with self.assertRaises(OSError):index.open_image(ident)
+
     def test_text_directory_excluded(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'EMWIN'/'Text'/'wrong.png';p.parent.mkdir(parents=True);p.write_bytes(PNG)
