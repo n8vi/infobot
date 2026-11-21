@@ -18,6 +18,18 @@ from core import Config
 
 @unittest.skipUnless(HAS_LIBRARY,'install requirements.txt for TCP integration test')
 class RadioTest(unittest.IsolatedAsyncioTestCase):
+    async def test_web_command_uses_bounded_worker(self):
+        from unittest.mock import AsyncMock
+
+        runner = Runner(Config(state=':memory:', command_timeout=45))
+        try:
+            with patch('bot.execute_bounded', new_callable=AsyncMock, return_value='Answer') as execute:
+                self.assertEqual(await runner.execute(runner.engine, 'bot', ['a question'], {}, {}), 'Answer')
+                execute.assert_awaited_once_with(runner.engine, 'bot', ['a question'], {}, {}, 20,
+                                                runner.execution_slots)
+        finally:
+            runner.state.db.close()
+
     async def test_real_library_tcp_ping_and_channel_isolation(self):
         sent=[];adverts=[];completed=asyncio.Event();connections=[]
         ts=int(time.time())

@@ -147,6 +147,7 @@ A companion send error triggers reconnect rather than blind retries.
 | `adsb`, `planes` | Fresh airborne aircraft, nearest first |
 | `ais`, `boats` | Recently heard vessels, nearest first |
 | `internet` | DNS reachability probes to root servers |
+| `bot, <question>` | Search the public web and return a short answer |
 | `get <HTTP(S) URL>` | Public fetched text, only if it fits one packet |
 | `status` | Uptime, GOES index health and conversation's source-request status |
 | `more` | Next saved reply batch; on failed DM delivery resumes the failed packet |
@@ -228,8 +229,8 @@ python bot.py --preview 'wx huron'     # no radio connection
 python bot.py --check-sources          # structured source schema/freshness checks
 ```
 
-Preview and source diagnostics may access the network; `ping <target>` preview
-is refused. They do not transmit on MeshCore. The bot's `/state/health.json`
+Preview and source diagnostics may access the network. Preview refuses
+`ping <target>` and `bot, <question>`. They do not transmit on MeshCore. The bot's `/state/health.json`
 reports radio connection, worker state, and last command error. Its Docker
 health check requires recent radio/worker health. GOES `/healthz` requires a
 completed recent index with products, no index error, and a recent healthy map
@@ -280,7 +281,7 @@ a path update nor an encrypted path packet is accepted as confirmation.
 Normal GOES/AIS/ADS-B sources allow LAN/loopback and local AMPRNet
 `44.31.120.0/24` only. Validated DNS addresses are pinned for HTTP connections;
 redirects and environment proxies are disabled, with a 5MB response cap.
-`internet`, `get`, satellite element refresh, and targeted `ping` intentionally
+`internet`, `get`, satellite element refresh, targeted `ping`, and `bot, <question>` intentionally
 use the network. `get` pins validated public addresses and rejects private/local
 AMPRNet destinations. `ping` may reach any routable target, including LAN.
 
@@ -290,6 +291,20 @@ application files readable explicitly, independent of checkout permissions. The 
 `state` volume. Builds need the base images, apt and Python packages.
 The GOES service reads SatDump data read-only and makes no outbound requests.
 See [the GOES README](infobot-goes/README.md) for API and map details.
+
+Enable web answers with the optional Compose profile:
+
+```bash
+docker compose --profile web pull searxng
+docker compose --profile web up -d --build --pull never infobot searxng
+```
+
+SearXNG listens on the Compose network at `http://searxng:8080` and has no
+published host port. Infobot searches using the question and sends the result
+snippets to llama.cpp at `http://10.0.0.10:8080` for a single chat completion.
+Configure the service URLs with `SEARXNG_URL` and `LLAMA_URL`. The model has no
+tools, and Infobot never opens result links. Questions from channels and DMs
+go to public search engines. Keep private information out of these queries.
 
 For offline transfer, build both images on a compatible Linux architecture:
 
