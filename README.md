@@ -8,7 +8,7 @@ used. Scanner/transcript integration and active weather warnings are not impleme
 
 ## Upgrade and deploy
 
-This repository contains both services. Run Compose from this directory;
+This repository contains Infobot, the GOES API, and SearXNG. Run Compose from this directory;
 there is no separate Compose project inside `infobot-goes/`.
 Existing `.env` files work without edits: all existing keys retain their
 meaning. Missing new keys use the defaults described below. Version 0.6.0
@@ -20,6 +20,7 @@ cp .env.example .env  # first installation only; retain an existing .env on upgr
 # Adjust source addresses and GOES_ROOT to match your host.
 docker compose config --quiet
 docker compose build
+docker compose pull searxng
 docker compose up -d --no-build --pull never infobot-goes
 docker compose run --rm infobot python bot.py --check-sources
 ```
@@ -292,13 +293,7 @@ application files readable explicitly, independent of checkout permissions. The 
 The GOES service reads SatDump data read-only and makes no outbound requests.
 See [the GOES README](infobot-goes/README.md) for API and map details.
 
-Enable web answers with the optional Compose profile:
-
-```bash
-docker compose --profile web pull searxng
-docker compose --profile web up -d --build --pull never infobot searxng
-```
-
+Compose starts SearXNG automatically when you start Infobot.
 SearXNG listens on the Compose network at `http://searxng:8080` and has no
 published host port. Infobot searches using the question and sends the result
 snippets to llama.cpp at `http://10.0.0.10:8080` for a single chat completion.
@@ -306,13 +301,14 @@ Configure the service URLs with `SEARXNG_URL` and `LLAMA_URL`. The model has no
 tools, and Infobot never opens result links. Questions from channels and DMs
 go to public search engines. Keep private information out of these queries.
 
-For offline transfer, build both images on a compatible Linux architecture:
+For an offline deployment, transfer the Infobot and GOES images from a compatible
+Linux architecture. Start those two services with `--no-deps` to skip SearXNG.
 
 ```bash
 docker save infobot:0.6.0 infobot-goes:0.3.1 -o infobot-images.tar
 # On the destination, with this repository and its .env:
 docker load -i infobot-images.tar
-docker compose up -d --no-build --pull never
+docker compose up -d --no-build --pull never --no-deps infobot infobot-goes
 ```
 
 Stop infobot before restoring another bot to the companion. Retain the state

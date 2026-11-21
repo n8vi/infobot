@@ -4,6 +4,8 @@ services:
     build: .
     pull_policy: never
     restart: unless-stopped
+    depends_on:
+      - searxng
     environment:
       MESH_HOST: ${MESH_HOST:-10.0.0.10}
       MESH_PORT: ${MESH_PORT:-5051}
@@ -54,7 +56,6 @@ services:
 
   searxng:
     image: searxng/searxng@sha256:fc1d81d7e9d04d3c8b3e23c7162feddf5c3d6aecd32e67a56eaabcb8d8747f79
-    profiles: [web]
     restart: unless-stopped
     environment:
       SEARXNG_SETTINGS_PATH: /infobot-searxng.yml
