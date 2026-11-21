@@ -17,6 +17,7 @@ import socket
 import ssl
 import struct
 import tempfile
+import time
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 import urllib.request
 from zoneinfo import ZoneInfo
