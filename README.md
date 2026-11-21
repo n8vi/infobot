@@ -297,6 +297,8 @@ Compose starts SearXNG automatically when you start Infobot.
 SearXNG listens on the Compose network at `http://searxng:8080` and has no
 published host port. Infobot searches using the question and sends the result
 snippets to llama.cpp at `http://10.0.0.10:8080` for a single chat completion.
+The search request gets up to five seconds within the overall
+`COMMAND_TIMEOUT` deadline (45 seconds by default).
 Configure the service URLs with `SEARXNG_URL` and `LLAMA_URL`. The model has no
 tools, and Infobot never opens result links. Questions from channels and DMs
 go to public search engines. Keep private information out of these queries.

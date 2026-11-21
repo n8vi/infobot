@@ -34,7 +34,6 @@ DNS_ROOTS = (
 AMPR_LAN = ipaddress.ip_network('44.31.120.0/24')
 CELESTRAK_URL = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=json'
 CELESTRAK_HOSTS = {'celestrak.org', 'www.celestrak.org'}
-WEB_ANSWER_TIMEOUT = 20
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -80,14 +79,14 @@ def _public_result(url):
     return address.is_global and not address.is_multicast and address not in AMPR_LAN
 
 
-def web_answer(question, searxng, llama, answer_bytes, now):
-    deadline = time.monotonic() + WEB_ANSWER_TIMEOUT
+def web_answer(question, searxng, llama, answer_bytes, now, timeout):
+    deadline = time.monotonic() + timeout
     # Remove SearXNG engine selectors, language selectors, and external bangs.
     query = ' '.join(word for word in question.split() if not word.startswith(('!', ':')))
     if not query:
         return 'Use bot, <question>.'
     params = urlencode({'q': query, 'format': 'json', 'categories': 'general'})
-    result = _web_json(f'{searxng.rstrip("/")}/search?{params}', 5)
+    result = _web_json(f'{searxng.rstrip("/")}/search?{params}', min(5, timeout))
     entries = result.get('results')
     if not isinstance(entries, list):
         raise ValueError('Expected a list of search results')

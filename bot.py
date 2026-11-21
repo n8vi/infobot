@@ -17,7 +17,6 @@ import time
 from core import VERSION, Config, Engine, State, parse_command, clean, local_addresses, number, packet_metadata_from_raw, validate_source
 from command_worker import execute_bounded
 from delivery import SerializedCommands, Transmitter
-from internet_features import WEB_ANSWER_TIMEOUT
 
 NAME = 'infobot'
 CHANNEL = '#infobot'
@@ -195,10 +194,7 @@ class Runner:
     async def execute(self,engine,cmd,args,payload,contacts):
         if cmd in ('about','help','path','hashsize') or (cmd=='ping' and not args):
             return engine.execute(cmd,args,payload,contacts)
-        timeout = self.config.command_timeout
-        if cmd == 'bot':
-            timeout = min(timeout, WEB_ANSWER_TIMEOUT)
-        return await execute_bounded(engine,cmd,args,payload,contacts,timeout,self.execution_slots)
+        return await execute_bounded(engine,cmd,args,payload,contacts,self.config.command_timeout,self.execution_slots)
 
     async def current_dm_contacts(self,mc,sender):
         from meshcore import EventType

@@ -25,7 +25,7 @@ class RadioTest(unittest.IsolatedAsyncioTestCase):
         try:
             with patch('bot.execute_bounded', new_callable=AsyncMock, return_value='Answer') as execute:
                 self.assertEqual(await runner.execute(runner.engine, 'bot', ['a question'], {}, {}), 'Answer')
-                execute.assert_awaited_once_with(runner.engine, 'bot', ['a question'], {}, {}, 20,
+                execute.assert_awaited_once_with(runner.engine, 'bot', ['a question'], {}, {}, 45,
                                                 runner.execution_slots)
         finally:
             runner.state.db.close()

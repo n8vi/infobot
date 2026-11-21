@@ -915,7 +915,7 @@ class Engine:
             return fetch_one_packet(' '.join(args),c.byte_limit)
         if cmd=='bot':
             if not args:return 'Use bot, <question>.'
-            reply = web_answer(args[0], c.searxng, c.llama, c.byte_limit, now)
+            reply = web_answer(args[0], c.searxng, c.llama, c.byte_limit, now, c.command_timeout)
             if len(reply.encode()) <= c.byte_limit:
                 return reply
             pages = chunks(reply, c.byte_limit - 25)
