@@ -60,6 +60,25 @@ class Tests(unittest.TestCase):
         for absent in ('OLD:','GROUND:'):self.assertNotIn(absent,text)
     def test_stale_aircraft_file(self):
         self.assertIn('unavailable',aircraft({'now':NOW-130,'aircraft':[]},Config(),NOW,LOCATION))
+    def test_tracking_searches_do_not_need_requester_location(self):
+        plane = {'hex':'a12345','flight':'TEST1  ','r':'N123AB','seen':10,
+                 'lat':43.8,'lon':-83.1,'seen_pos':65,'alt_baro':'ground'}
+        ship = {'mmsi':367123456,'imo':1234567,'shipname':'TEST  BOAT@@','callsign':'WABC',
+                'last_signal':70}
+        feeds = {'ADSB':{'now':NOW,'aircraft':[plane,dict(plane,hex='a98765',seen=61)]},
+                 'AIS':{'ships':[ship,dict(ship,mmsi=367123457,last_signal=1900)]}}
+        with patch.object(Sources, 'get', side_effect=lambda label, *a, **kw: feeds[label]):
+            engine = Engine(Config(), Sources())
+            payload = {'_dm_sender':'missing'}
+            for args in (['n123ab'], ['A12345'], ['test1']):
+                result = engine.execute('adsb',args,payload,{},NOW)
+                self.assertIn('TEST1 / N123AB / a12345: ground',result)
+                self.assertNotIn('a98765',result)
+                self.assertNotIn('43.800',result)
+            for args in (['367123456'], ['1234567'], ['IMO','1234567'], ['test','boat'], ['wabc']):
+                result = engine.execute('ais',args,payload,{},NOW)
+                self.assertIn('MMSI 367123456, IMO 1234567, WABC',result)
+                self.assertNotIn('367123457',result)
     def test_ais_age_and_nonships(self):
         ships=[{'mmsi':367123456,'shipname':'FREIGHTER','last_signal':70,'speed':12.5},
                {'mmsi':367123457,'shipname':'OLD','last_signal':1900},

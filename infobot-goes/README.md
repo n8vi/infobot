@@ -172,8 +172,8 @@ Code remains in /opt/infobot-goes for inspection or reuse.
 Default root: /home/brad/goes/goes-hrit/EMWIN/Text
 
 The index recursively enumerates filenames. It filters names before doing
-stat or read calls, and retains only eight recent deliveries for each ZFPDTX
-or KWNP product. This bounds content work even with 475,000 files. No archive
+stat or read calls and retains up to 32 recent deliveries per EMWIN zone
+forecast product and eight per KWNP product. No archive
 scan is performed by an HTTP request. Unchanged candidate files are cached
 in memory. A restart rebuilds the index; no persistent database is needed.
 
@@ -183,12 +183,23 @@ the last valid product stays available and ages naturally. Stable files
 aren't guaranteed free of RF corruption: this parser checks required
 structure, not every sentence. No missing prose is synthesized.
 
-Ordering is by parsed bulletin issue time, with EMWIN delivery time as a
-tiebreaker. A later delivery of an older bulletin cannot replace a newer
-indexed bulletin. The eight-delivery shortlist means an extreme backlog of
-replays on a cold start can hide an older delivery of the newest issue.
+The index matches forecasts using the zone codes within each bulletin. Each
+zone keeps its latest valid section by issue time, with EMWIN delivery time
+as the tiebreaker. A partial update changes only the zones it includes. On
+startup, the delivery shortlist limits how far back the index searches.
 File mtime is exposed as file_mtime, NOT asserted to be reception time.
 delivery_at is from the EMWIN filename, not a local reception measurement.
+
+### Bundled geography
+
+`weather_geography.json.gz` contains all 83 Michigan counties, national
+county-to-zone mappings from the [NWS April 2026 zone-county file](https://www.weather.gov/gis/ZoneCounty),
+and 41,174 five-digit ZIP entries. ZIPs use the county with the largest share
+of residential addresses in the [HUD–USPS June 2026 crosswalk](https://github.com/ClearrowCEO/HUD-Reference-Data/blob/main/hud-zip-county-crosswalk_2026-06.csv),
+with total address share as the tiebreaker. [GeoNames postal data](https://www.geonames.org/export/zip/)
+([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)) fills gaps when its
+county code matches the NWS table. ZIPs without a county or NWS zone mapping
+are reported as unavailable. The lookup uses only this bundled file at runtime.
 
 ## API contract
 
@@ -204,12 +215,18 @@ delivery_at is from the EMWIN filename, not a local reception measurement.
   Oakland, Macomb, Washtenaw, Wayne, Lenawee, or Monroe. County sections
   present in the received bulletin are returned; absent sections are omitted
   from `all` and return 404 when selected explicitly.
+- GET /v1/weather?place=Marquette (or `place=02108`) resolves a Michigan county
+  name or five-digit U.S. ZIP. The response includes the resolved `county`
+  and a `forecasts` array with one entry per NWS zone. An entry without an
+  issue time has no indexed forecast. An unresolved place returns an
+  `unavailable` message. Keep leading zeroes in ZIP codes.
 - GET /v1/spaceweather (alias /v1/aurora): latest indexed SWPC bulletin per
   product code, verbatim text, parsed issue time and limited structured
   fields. Includes newest K-threshold alert and solar wind discussion.
 - Unknown routes return 404, invalid county returns 400, absent products 503.
 
-Times are ISO 8601 UTC; forecast dates are America/Detroit local dates.
+Times are ISO 8601. Explicit place forecasts use dates local to the
+bulletin section. The Detroit/Pontiac county view uses America/Detroit.
 Weather includes today's and tomorrow's day AND night periods when present.
 It selects by dates derived from the bulletin issue time; yesterday's TODAY
 is never relabeled today. Weekday and common relative labels are supported,
@@ -221,7 +238,7 @@ daytime forecasts; an evening bulletin may legitimately lack today's day.
 Full NWS forecast prose is retained. Mesh-friendly shortening, pagination,
 byte limits, and rate limiting belong to the phase-two bot adapter.
 
-Staleness policies: 24 hours for DTX weather forecasts, 18 hours for
+Staleness policies: 24 hours for zone weather forecasts, 18 hours for
 space-weather forecast/discussion bulletins, 36 hours for daily indices,
 three hours for threshold alerts. These are
 conservative display policies, NOT official validity or cancellation rules.

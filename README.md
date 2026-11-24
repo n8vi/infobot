@@ -142,11 +142,11 @@ A companion send error triggers reconnect rather than blind retries.
 | `ping <IP or hostname>` | Three bounded ICMP probes |
 | `path [hex]` | Numbered repeater hops, resolving local contacts; aliases `decode`, `route`, `p` |
 | `hashsize`, `region` | Path hash width and region tag |
-| `wx [county]` | Today/tomorrow forecasts; explicit county works without requester location |
+| `wx [county or ZIP]` | Today/tomorrow forecasts for any Michigan county or five-digit U.S. ZIP in the bundled lookup |
 | `aurora`, `spacewx` | Fresh GOES DAYDIS forecast wording, without retrospective summaries |
 | `sat [NORAD ID or name[,name...]]` | Complete current/next amateur satellite passes |
-| `adsb`, `planes` | Fresh airborne aircraft, nearest first |
-| `ais`, `boats` | Recently heard vessels, nearest first |
+| `adsb [registration, ICAO address, or flight ID]`, `planes` | Search recent local aircraft records or list nearby airborne aircraft |
+| `ais [MMSI, IMO, vessel name, or radio call sign]`, `boats` | Search recently heard vessels or list them nearest first |
 | `internet` | DNS reachability probes to root servers |
 | `bot, <question>` | Search the public web and return a short answer |
 | `get <HTTP(S) URL>` | Public fetched text, only if it fits one packet |
@@ -185,13 +185,20 @@ or differ from the incoming route. Missing, malformed, or ambiguous return
 routes report location unavailable; `wx <county>` still works. A confirmed
 zero-hop return route retains the local Pinnebog fallback. No internet geolocation is used.
 
-Weather uses bundled land-only Census TIGER/Line 2024 county polygons for the
+Bare `wx` uses bundled land-only Census TIGER/Line 2024 county polygons for the
 17 Detroit/Pontiac counties: Midland, Bay, Huron, Saginaw, Tuscola, Sanilac,
 Shiawassee, Genesee, Lapeer, St. Clair (`stclair`), Livingston, Oakland,
 Macomb, Washtenaw, Wayne, Lenawee, Monroe. The containing county is first;
 a different nearest-center county is added if its center is within 50 miles.
 Outside/border/water points use the nearest center only when a supported
-county boundary is within 50 miles. Missing bulletin sections are reported.
+county boundary is within 50 miles.
+
+Explicit requests such as `wx Marquette` or `wx 02108` work without a requester
+location. The bot resolves ZIPs and Michigan county names using bundled
+geography and retrieves forecasts from locally received GOES-19 EMWIN zone
+bulletins. If a county has multiple forecast zones, the reply identifies each
+zone. The bot reports unavailable forecasts when a place has no usable
+local bulletin or county mapping.
 GOES scans must be within ten minutes; county forecasts may be up to 24 hours
 old. Space-weather discussions may be up to 18 hours old. Both reject index
 errors and issue times over five minutes in the future.
@@ -205,11 +212,14 @@ limit is stated when a boundary cannot be found. `SAT_ALT_M` defaults to 200m.
 Elements refresh at `SAT_TLE_REFRESH_HOURS` (12h); failed refreshes can use the
 cache, with a warning when elements are over three days old.
 
-ADS-B expects readsb/tar1090 `now` and `aircraft[]`, filters receiver/position
-age (default 60s), excludes ground/unpositioned records, and has no radius
-filter. AIS expects object records in `ships[]`, with `last_signal` age in
+ADS-B expects readsb/tar1090 `now` and `aircraft[]`. Bare `adsb` lists
+airborne records with positions within the age limit (default 60s), sorted
+by distance. AIS expects object records in `ships[]`, with `last_signal` age in
 seconds (default 30 minutes). AIS heard time is not necessarily position time;
 missing coordinates sort last. AIS is fetched without response caching.
+Explicit searches use case-insensitive exact matches and work without
+requester location. Identifiers come from the local feeds when present.
+`ais IMO 1234567` also accepts the numeric IMO without the prefix.
 
 ## Limits, diagnostics and health
 
