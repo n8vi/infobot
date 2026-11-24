@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
-from internet_features import SatellitePasses, fetch_one_packet, internet_status, _PinnedHTTP, _PinnedHTTPS
+from internet_features import SatellitePasses, fetch_one_packet, internet_status, web_answer, _PinnedHTTP, _PinnedHTTPS
 import ssl
 
 VERSION = '0.6.0'
@@ -29,7 +29,7 @@ ALIASES = {'planes': 'adsb', 'boats': 'ais', 'spacewx': 'aurora', 'decode': 'pat
 COMMANDS = {'help', 'about', 'ping', 'path', 'wx', 'aurora', 'adsb', 'ais', 'status', 'more', 'repeat', 'hashsize', 'internet', 'get', 'sat'}
 HELP = ('Commands: ping [host]; path [hex]; wx [county]; aurora/spacewx; '
         'adsb/planes; ais/boats; hashsize/region; internet; get <URL>; sat [ID|name[,name...]]; '
-        'status; more; repeat <page>; about. Prefix ! optional. help <command> for details.')
+        'bot, <question>; status; more; repeat <page>; about. Prefix ! optional. help <command> for details.')
 HELP_DETAIL = {
  'wx': 'wx: your supported county first, then a different nearest-center county if within 50 mi. Outside the supported area, the nearest forecast is shown only within 50 mi. wx <county>: one county.',
  'path': 'path: repeaters on this message route. path aabb,ccdd: decode supplied hashes. Bare hex defaults to 2-byte hops. Unknown/colliding hashes are marked.',
@@ -42,6 +42,7 @@ HELP_DETAIL = {
  'more': 'more: next page of your last long reply. Expires after 10 min. Channel names are not authenticated identities.',
  'repeat': 'repeat <page>: resend a page from the last reply without advancing the more cursor.',
  'internet': 'internet: test outbound DNS reachability by querying several DNS root servers directly.',
+ 'bot': 'bot, <question>: search the public web and return a short answer. The query goes to public search engines.',
  'get': 'get <http(s) URL>: fetch public text and return it unchanged only if it fits in one MeshCore packet.',
  'sat': 'sat: amateur satellites up or rising within an hour for hop 1; DMs use the learned sender-side route; direct/pathless channel requests use Pinnebog. sat <NORAD ID|name[,name...]>: next pass.',
 }
@@ -61,6 +62,8 @@ class Config:
     state: str = '/state/infobot.sqlite3'
     sat_alt_m: float = 200
     sat_tle_refresh_hours: float = 12
+    searxng: str = "http://searxng:8080"
+    llama: str = "http://10.0.0.10:8080"
     channels: tuple = (('#infobot', 'bare'),)
     dm_enabled: bool = True
     dm_ack_timeout: float = 0  # 0: companion suggestion, with a 5-second floor
@@ -87,6 +90,8 @@ class Config:
         c.gap = float(os.getenv('TX_GAP', '6'))
         c.sat_alt_m = float(os.getenv('SAT_ALT_M', '200'))
         c.sat_tle_refresh_hours = float(os.getenv('SAT_TLE_REFRESH_HOURS', '12'))
+        c.searxng = os.getenv('SEARXNG_URL', c.searxng)
+        c.llama = os.getenv('LLAMA_URL', c.llama)
         raw_channels = os.getenv('BOT_CHANNELS', '#infobot=bare')
         channels = []
         for entry in raw_channels.split(','):
@@ -148,8 +153,11 @@ def parse_command(text, policy='bare'):
     if policy == 'bang' and not bang: return None
     if policy == 'either' and not (bang or mentioned): return None
     if text.lower().startswith('infobot:'): text = text[8:].strip()
-    if text.startswith('!'): text = text[1:]
+    if text.startswith('!'): text = text[1:].lstrip()
     if not text: return None
+    if text[:4].lower() == 'bot,':
+        question = text[4:].strip()
+        return 'bot', [question] if question else []
     words = text.split()
     cmd = ALIASES.get(words[0].lower(), words[0].lower())
     return (cmd, words[1:]) if cmd in COMMANDS else None
@@ -898,13 +906,23 @@ class Engine:
     def execute(self,cmd,args,payload=None,contacts=None,now=None):
         now=now or time.time();payload=payload or {};contacts=contacts or {}
         c=self.config
-        if cmd=='about':return f'Infobot v{VERSION}\nThe homebrew bot at tarratt.net HQ.\nNetwork commands: internet, get, sat refresh, ping <target>.'
+        if cmd=='about':return f'Infobot v{VERSION}\nThe homebrew bot at tarratt.net HQ.\nNetwork commands: internet, get, sat refresh, ping <target>, bot, <question>.'
         if cmd=='internet':
             if args:return 'Use internet with no arguments.'
             return internet_status()
         if cmd=='get':
             if not args:return 'Use get <http(s) URL>.'
             return fetch_one_packet(' '.join(args),c.byte_limit)
+        if cmd=='bot':
+            if not args:return 'Use bot, <question>.'
+            reply = web_answer(args[0], c.searxng, c.llama, c.byte_limit, now, c.command_timeout)
+            if len(reply.encode()) <= c.byte_limit:
+                return reply
+            pages = chunks(reply, c.byte_limit - 25)
+            if len(pages) > c.parts:
+                pages = pages[:c.parts]
+                pages[-1] = pages[-1].encode()[:c.byte_limit - 28].decode('utf-8', 'ignore').rstrip() + '…'
+            return '\n'.join(pages)
         if cmd=='sat':
             location,error=request_location(payload,contacts)
             return error or self.satellites.report(args,now,location)

@@ -509,6 +509,8 @@ def main():
         if not parsed or parsed[0]=='more':raise SystemExit('Use a supported command other than more')
         if parsed[0]=='ping' and parsed[1]:
             raise SystemExit('Ping preview would send network probes; use ping <target> in #infobot.')
+        if parsed[0] == 'bot' and parsed[1]:
+            raise SystemExit('Bot preview would send a web search; use bot, <question> in #infobot.')
         engine=Engine(config)
         text=engine.execute(*parsed,preview_payload,preview_contacts)
         from core import chunks

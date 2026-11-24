@@ -4,6 +4,8 @@ services:
     build: .
     pull_policy: never
     restart: unless-stopped
+    depends_on:
+      - searxng
     environment:
       MESH_HOST: ${MESH_HOST:-10.0.0.10}
       MESH_PORT: ${MESH_PORT:-5051}
@@ -30,6 +32,8 @@ services:
       QUEUE_LIMIT: ${QUEUE_LIMIT:-8}
       GLOBAL_QUEUE_LIMIT: ${GLOBAL_QUEUE_LIMIT:-64}
       ADVERT_INTERVAL: ${ADVERT_INTERVAL:-14400}
+      SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+      LLAMA_URL: ${LLAMA_URL:-http://10.0.0.10:8080}
       STATE_DB: /state/infobot.sqlite3
     volumes:
       - state:/state
@@ -49,6 +53,26 @@ services:
       timeout: 5s
       retries: 3
       start_period: 120s
+
+  searxng:
+    image: searxng/searxng@sha256:fc1d81d7e9d04d3c8b3e23c7162feddf5c3d6aecd32e67a56eaabcb8d8747f79
+    restart: unless-stopped
+    environment:
+      SEARXNG_SETTINGS_PATH: /infobot-searxng.yml
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        export SEARXNG_SECRET="$$(head -c 32 /dev/urandom | base64)"
+        exec /usr/local/searxng/entrypoint.sh
+    volumes:
+      - type: bind
+        source: ./searxng.yml
+        target: /infobot-searxng.yml
+        read_only: true
+        bind:
+          create_host_path: false
+    security_opt: [no-new-privileges:true]
 
   infobot-goes:
     image: infobot-goes:0.3.1

@@ -30,7 +30,7 @@ class Tests(unittest.TestCase):
         self.assertIn('wx',e.execute('help',[]))
         self.assertIn('DAYDIS',e.execute('help',['spacewx']))
         self.assertEqual(parse_command('about'),('about',[]))
-        self.assertEqual(e.execute('about',[]),f'Infobot v{VERSION}\nThe homebrew bot at tarratt.net HQ.\nNetwork commands: internet, get, sat refresh, ping <target>.')
+        self.assertEqual(e.execute('about',[]),f'Infobot v{VERSION}\nThe homebrew bot at tarratt.net HQ.\nNetwork commands: internet, get, sat refresh, ping <target>, bot, <question>.')
     def test_weather_dates_probabilities(self):
         text=weather(WX,'huron',NOW,LOCATION)
         for value in ['20%','50','Tonight','Tomorrow','35 mph']:self.assertIn(value,text)
