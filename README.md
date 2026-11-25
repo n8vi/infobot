@@ -167,7 +167,10 @@ Keep host and companion clocks synchronized. Duplicate fingerprints persist
 ## Locations and freshness
 
 For location-dependent commands, captured flood paths resolve hop 1 against
-local repeater contacts. Unknown/colliding hashes and missing coordinates are
+local repeater contacts. Path and location lookups ignore repeaters whose last
+advert is at least 48 hours old. Contacts without a usable advert timestamp
+remain eligible, and this filter keeps the contact records on the radio.
+Unknown/colliding hashes and missing coordinates are
 reported. Radio logs must match message identity; timestamp proximity alone
 is insufficient. Pathless/direct channel requests use advertised Pinnebog coordinates
 when unambiguous, otherwise the bundled Pinnebog point. Private companion
