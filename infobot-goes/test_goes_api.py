@@ -131,6 +131,38 @@ class Tests(unittest.TestCase):
     def test_combined_zones(self):
         self.assertEqual(zone_codes('MIZ049-054>055-\n072115-\n'), {'MIZ049', 'MIZ054', 'MIZ055'})
 
+    def test_place_forecasts_use_zone_updates_and_bulletin_local_dates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def delivery(product, serial, timestamp, sections):
+                text = f'{product[:6]}\n{timestamp}\n'
+                for codes, forecast in sections:
+                    text += f'{codes}-181800-\n{timestamp}\n.TODAY...{forecast}\n$$\n'
+                stamp = '202611172359' + serial
+                path = Path(directory) / f'A_FPUS53KXXX172359_C_KWIN_{stamp}_123456-3-{product}.TXT'
+                path.write_text(text)
+                os.utime(path, (1, 1))
+
+            delivery('ZFPAPXMI', '01', '600 PM EST Tue Nov 17 2026',
+                     [('MIZ095-096', 'Clear.'), ('MIZ097', 'Rain.')])
+            delivery('ZFPAPXMI', '02', '650 PM EST Tue Nov 17 2026', [('MIZ097', 'Snow.')])
+            delivery('ZFPHFOHI', '03', '130 PM HST Tue Nov 17 2026', [('HIZ006-035', 'Sunny.')])
+            index = Index(directory)
+            index.scan()
+            now = datetime(2026, 11, 18, 1, tzinfo=UTC)
+            _, county = index.respond('/v1/weather', {'place': ['Mackinac County']}, now)
+            self.assertEqual(county['county'], 'Mackinac, MI')
+            self.assertEqual({item['zone']: item['periods'][0]['text'] for item in county['forecasts']},
+                             {'MIZ095': 'Clear.', 'MIZ096': 'Clear.', 'MIZ097': 'Snow.'})
+            _, hawaii = index.respond('/v1/weather', {'place': ['96813']}, now)
+            self.assertEqual(hawaii['county'], 'Honolulu, HI')
+            forecast = next(item for item in hawaii['forecasts'] if item['zone'] == 'HIZ035')
+            self.assertEqual(forecast['requested_dates'], ['2026-11-17', '2026-11-18'])
+            self.assertEqual(forecast['periods'][0]['text'], 'Sunny.')
+            _, boston = index.respond('/v1/weather', {'place': ['02108']}, now)
+            self.assertEqual(boston['county'], 'Suffolk, MA')
+            self.assertNotIn('issued_at', boston['forecasts'][0])
+            self.assertEqual(index.respond('/v1/spaceweather', {}, now)[0], 503)
+
     def test_unknown_period_not_guessed(self):
         issue = local_issue(WX)
         self.assertIsNone(period_date('SUNDAY THROUGH TUESDAY', issue, issue.date()))

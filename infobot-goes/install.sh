@@ -8,7 +8,7 @@ fi
 /usr/bin/python3 -c 'import zoneinfo; zoneinfo.ZoneInfo("America/Detroit")'
 id brad >/dev/null
 install -d -m 755 /opt/infobot-goes
-install -m 644 goes_api.py maps.py gallery.html /opt/infobot-goes/
+install -m 644 goes_api.py maps.py gallery.html weather_geography.json.gz /opt/infobot-goes/
 install -m 644 infobot-goes.service /etc/systemd/system/infobot-goes.service
 systemctl daemon-reload
 systemctl enable infobot-goes.service

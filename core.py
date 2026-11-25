@@ -12,7 +12,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 from internet_features import SatellitePasses, fetch_one_packet, internet_status, web_answer, _PinnedHTTP, _PinnedHTTPS
 import ssl
@@ -27,16 +27,16 @@ CIRCLED_HOP_NUMBERS = '❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯⓰⓱⓲⓳
 ALIASES = {'planes': 'adsb', 'boats': 'ais', 'spacewx': 'aurora', 'decode': 'path', 'route': 'path', 'p': 'path',
            'region': 'hashsize'}
 COMMANDS = {'help', 'about', 'ping', 'path', 'wx', 'aurora', 'adsb', 'ais', 'status', 'more', 'repeat', 'hashsize', 'internet', 'get', 'sat'}
-HELP = ('Commands: ping [host]; path [hex]; wx [county]; aurora/spacewx; '
+HELP = ('Commands: ping [host]; path [hex]; wx [county/ZIP]; aurora/spacewx; '
         'adsb/planes; ais/boats; hashsize/region; internet; get <URL>; sat [ID|name[,name...]]; '
         'bot, <question>; status; more; repeat <page>; about. Prefix ! optional. help <command> for details.')
 HELP_DETAIL = {
- 'wx': 'wx: your supported county first, then a different nearest-center county if within 50 mi. Outside the supported area, the nearest forecast is shown only within 50 mi. wx <county>: one county.',
+ 'wx': 'wx <Michigan county> or wx <5-digit US ZIP> finds local GOES forecasts. Bare wx uses your estimated location in the Detroit/Pontiac area or within 50 mi.',
  'path': 'path: repeaters on this message route. path aabb,ccdd: decode supplied hashes. Bare hex defaults to 2-byte hops. Unknown/colliding hashes are marked.',
  'hashsize': 'hashsize/region: path hash bytes per hop and the flood region tag on this command packet. Region names are matched against configured local hashtag regions.',
  'aurora': 'aurora/spacewx: GOES Forecast Discussion (DAYDIS), with forecast text for solar activity, particles, solar wind and geospace.',
- 'adsb': 'adsb/planes: current fresh aircraft from Hinton, nearest-first from hop 1; DMs use the learned sender-side route; direct/pathless channel requests use Pinnebog. more: remaining aircraft.',
- 'ais': 'ais/boats: vessels heard by tarratt.net within 30 min, nearest-first from hop 1; DMs use the learned sender-side route; direct/pathless channel requests use Pinnebog. more: remaining vessels.',
+ 'adsb': 'adsb <registration|ICAO address|flight ID> searches the local feed. Bare adsb lists nearby aircraft.',
+ 'ais': 'ais <MMSI|IMO|vessel name|radio call sign> searches the local feed. Bare ais lists nearby vessels.',
  'ping': 'ping: no argument replies Pong! ping <IPv4|IPv6|hostname> sends 3 ICMP probes and reports loss/latency.', 'status': 'status: uptime and last data-source request results; GOES discussion freshness.',
  'about': 'about: version and operating notes for infobot.',
  'more': 'more: next page of your last long reply. Expires after 10 min. Channel names are not authenticated identities.',
@@ -200,7 +200,8 @@ class Sources:
                 conn.close()
             data = json.loads(body)
             if not isinstance(data, dict): raise ValueError('Expected a JSON object')
-            self.cache[url] = (now, data)
+            if ttl > 0:
+                self.cache[url] = (now, data)
             self.health[label] = ('OK', time.time())
             return data
         except Exception:
@@ -499,13 +500,52 @@ def weather_counties(location):
     return [nearest_center_county(lat, lon)], True
 
 
+def weather_lines(item, title, now, dates):
+    if not fresh_record(item, 24*3600, now):
+        return [f'{title}: forecast stale/unavailable.']
+    local = stamp(item['local_time']).tzinfo if 'local_time' in item else LOCAL
+    issued = stamp(item['issued_at']).astimezone(local).strftime('%m/%d %H:%M')
+    tz = item.get('time_abbr', 'ET')
+    lines = [f'{title} WX issued {issued} {tz}:']
+    wanted = [p for p in item.get('periods', []) if p.get('date') in dates]
+    if not wanted:
+        lines.append('No today/tomorrow periods available.')
+    for period in wanted:
+        if period['date'] == dates[0]:
+            label = 'Tonight' if period.get('night') else 'Today'
+        else:
+            label = 'Tomorrow night' if period.get('night') else 'Tomorrow'
+        lines.append(f'{label}: {short_weather(period["text"])}')
+    if item.get('missing_dates'):
+        lines.append('Some daytime periods unavailable.')
+    return lines
+
+
 def weather(data, county, now, location):
     if not index_fresh(data, now): return 'WX unavailable: GOES index is not fresh/ready.'
     if data.get('index_error'): return 'WX unavailable: GOES index error.'
     try:
         if now-stamp(data['last_scan_at']).timestamp() > 600: return 'WX unavailable: GOES index has not refreshed in 10 min.'
     except (KeyError, TypeError, ValueError): return 'WX unavailable: missing index timestamp.'
+    if data.get('unavailable'):
+        return data['unavailable']
+    if 'forecasts' in data:
+        title = data['county']
+        forecasts = data['forecasts']
+        if not any(fresh_record(item, 24*3600, now) for item in forecasts):
+            return f'{title}: forecast unavailable from GOES-19.'
+        result = []
+        for item in forecasts:
+            name = item['name'] if len(forecasts) > 1 else title
+            if item.get('requested_dates'):
+                result.extend(weather_lines(item, name, now, item['requested_dates']))
+            else:
+                result.append(f'{name}: forecast unavailable from GOES-19.')
+        if len(forecasts) > 1:
+            result.insert(0, title)
+        return '\n'.join(result)
     today = datetime.fromtimestamp(now, LOCAL).date()
+    dates = [today.isoformat(), today.fromordinal(today.toordinal()+1).isoformat()]
     result = []
     if county:
         targets = [county]
@@ -518,21 +558,11 @@ def weather(data, county, now, location):
     indexed = data.get('counties', {})
     for name in targets:
         item = indexed.get(name)
+        title = DTX_COUNTIES.get(name, (name.title(),))[0]
         if item is None:
-            title = DTX_COUNTIES[name][0]
-            result.append(f'{title}: no forecast section in the latest DTX bulletin.')
+            result.append(f'{title}: forecast unavailable from GOES-19.')
             continue
-        if not fresh_record(item, 24*3600, now):
-            result.append(f'{name.title()}: forecast stale/unavailable.'); continue
-        issued = stamp(item['issued_at']).astimezone(LOCAL).strftime('%m/%d %H:%M')
-        result.append(f'{name.title()} WX issued {issued} ET:')
-        wanted = [p for p in item.get('periods', []) if p.get('date') in (today.isoformat(), (today.fromordinal(today.toordinal()+1)).isoformat())]
-        if not wanted: result.append('No today/tomorrow periods available.')
-        for p in wanted:
-            day = 'Today' if p['date']==today.isoformat() else 'Tomorrow'
-            if p.get('night'): day = 'Tonight' if day=='Today' else 'Tomorrow night'
-            result.append(f'{day}: {short_weather(p["text"])}')
-        if item.get('missing_dates'): result.append('Some daytime periods unavailable.')
+        result.extend(weather_lines(item, title, now, dates))
     return '\n'.join(result) if result else 'WX unavailable: no matching county.'
 
 
@@ -579,32 +609,56 @@ def spaceweather(data, now):
     return header + '\n'.join(forecasts)
 
 
-def aircraft(data, config, now, location):
+def tracking_key(value):
+    return clean(str(value)).strip('@ ').casefold() if value is not None else ''
+
+
+def aircraft(data, config, now, location, query=None):
     generated = number(data.get('now'))
     if generated is None or not -5 <= now-generated <= 120: return 'ADSB unavailable: receiver JSON timestamp missing/stale.'
     if not isinstance(data.get('aircraft'), list): raise ValueError('Not a readsb aircraft.json response')
     rows = []
+    target = tracking_key(query)
+    clock_skew = max(0, now-generated)
     for a in data['aircraft']:
         if not isinstance(a, dict): continue
         lat, lon, seen = number(a.get('lat')), number(a.get('lon')), number(a.get('seen_pos'))
-        if lat is None or lon is None or seen is None: continue
-        if not -90<=lat<=90 or not -180<=lon<=180 or not 0<=seen+max(0,now-generated)<=config.max_aircraft_age: continue
-        ident = clean(a.get('flight') or a.get('r') or a.get('hex') or '?')
+        positioned = lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180
+        fresh_position = positioned and seen is not None and 0 <= seen + clock_skew <= config.max_aircraft_age
         alt = a.get('alt_baro', a.get('alt_geom'))
-        if alt=='ground': continue
-        height = f'{int(number(alt))}ft' if number(alt) is not None else 'alt?'
         speed = number(a.get('gs'))
+        height = 'ground' if alt == 'ground' else f'{int(number(alt))}ft' if number(alt) is not None else 'alt?'
+        if query is not None:
+            fields = [a.get(field) for field in ('flight', 'r', 'hex')]
+            age = number(a.get('seen'))
+            if age is None:
+                age = seen
+            if (not target or target not in map(tracking_key, fields) or age is None
+                    or not 0 <= age + clock_skew <= config.max_aircraft_age):
+                continue
+            identifiers = ' / '.join(dict.fromkeys(clean(str(value)) for value in fields if tracking_key(value)))
+            motion = f' {speed:.0f}kt' if speed is not None else ''
+            position = f' at {lat:.3f}, {lon:.3f}' if fresh_position else ''
+            rows.append((age, f'{identifiers}: {height}{motion}{position}'))
+            continue
+        if not fresh_position: continue
+        ident = clean(a.get('flight') or a.get('r') or a.get('hex') or '?')
+        if alt=='ground': continue
         distance = distance_miles(location['lat'], location['lon'], lat, lon)
         rows.append((distance, seen, f'{ident}: {height}'+(f' {speed:.0f}kt' if speed is not None else '')+f' {distance:.1f}mi'))
     rows.sort()
+    if query is not None:
+        return '\n'.join(row[1] for row in rows) or f'No fresh aircraft matching {query} in the Hinton feed.'
     if not rows: return f'No fresh positioned aircraft in Hinton feed (<= {config.max_aircraft_age}s).'
     return f'Aircraft near {location["name"]} ({len(rows)}; nearest first):\n'+'\n'.join(x[2] for x in rows[:100]) + ('\nList capped at 100.' if len(rows)>100 else '')
 
 
-def vessels(data, config, now, location):
+def vessels(data, config, now, location, query=None):
     if data.get('error'): raise ValueError('AIS receiver reported an error')
     if not isinstance(data.get('ships'), list): raise ValueError('Expected AIS-catcher ships[] objects; use /api/ships_full.json')
     rows = []
+    target = tracking_key(query)
+    imo_match = re.fullmatch(r'(?:imo\s*)?(\d{7})', target)
     for s in data['ships']:
         if not isinstance(s, dict): raise ValueError('Compact AIS arrays unsupported; use /api/ships_full.json')
         mmsi = str(s.get('mmsi', ''))
@@ -617,11 +671,28 @@ def vessels(data, config, now, location):
         if speed is not None and not 0<=speed<102.3: speed = None
         lat = number(s.get('lat', s.get('latitude')))
         lon = number(s.get('lon', s.get('longitude')))
-        distance = (distance_miles(location['lat'], location['lon'], lat, lon)
-                    if lat is not None and lon is not None and -90<=lat<=90 and -180<=lon<=180 else float('inf'))
+        positioned = lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180
+        if query is not None:
+            imo = tracking_key(s.get('imo'))
+            if not target or not (target in (mmsi, tracking_key(s.get('shipname')), tracking_key(s.get('callsign')))
+                                  or imo_match and imo_match[1] == imo and imo != '0000000'):
+                continue
+            call = clean(s.get('callsign') or '').strip('@ ')
+            identifiers = f'MMSI {mmsi}'
+            if re.fullmatch(r'\d{7}', imo) and imo != '0000000':
+                identifiers += f', IMO {imo}'
+            if call and call != name:
+                identifiers += f', {call}'
+            motion = f' {speed:g}kt' if speed is not None else ''
+            position = f' at {lat:.3f}, {lon:.3f}' if positioned else ''
+            rows.append((age, f'{name or mmsi} ({identifiers}){motion}{position}, heard {age_label(age)} ago'))
+            continue
+        distance = distance_miles(location['lat'], location['lon'], lat, lon) if positioned else float('inf')
         proximity = f' {distance:.1f}mi' if math.isfinite(distance) else ' distance unknown'
         rows.append((distance, age, f'{name or mmsi}'+(f' {speed:g}kt' if speed is not None else '')+proximity+f' (heard {age_label(age)} ago)'))
     rows.sort()
+    if query is not None:
+        return '\n'.join(row[1] for row in rows) or f'No recently heard vessels matching {query} in the AIS feed.'
     if not rows: return f'No vessels heard by tarratt.net in the last {config.max_ship_age//60} min.'
     return f'Boats near {location["name"]} ({len(rows)}; nearest first):\n'+'\n'.join(x[2] for x in rows[:100])+('\nList capped at 100.' if len(rows)>100 else '')
 
@@ -931,22 +1002,27 @@ class Engine:
         if cmd=='path':return path_reply(args,payload,contacts)
         if cmd=='hashsize':return packet_info_reply(payload,c.region_names)
         if cmd=='wx':
-            county=''.join(re.findall(r'[a-z]+',' '.join(args).lower())) if args else None
-            if county and county not in DTX_COUNTIES:
-                return 'Use wx [county] from the 17 NWS Detroit/Pontiac counties.'
-            location,error=request_location(payload,contacts) if not county else (None,None)
+            url = c.goes+'/v1/weather'
+            if args:
+                place = ' '.join(args)
+                if not re.fullmatch(r"[A-Za-z][A-Za-z .'-]*|[0-9]{5}", place):
+                    return 'Use wx <Michigan county> or wx <5-digit US ZIP>.'
+                county = re.sub(r'[^a-z0-9]', '', place.lower()).removesuffix('county')
+                data = self.sources.get('GOES', url + '?' + urlencode({'place': place}), ttl=0)
+                return weather(data, county, now, None)
+            location,error=request_location(payload,contacts)
             if error:return error
-            text=weather(self.sources.get('GOES',c.goes+'/v1/weather'),county,now,location)
+            text=weather(self.sources.get('GOES',url),None,now,location)
             if location and location.get('basis')=='dm_return_route':
                 text=f'WX near {location["name"]} (DM route estimate):\n'+text
             return text
         if cmd=='aurora':return spaceweather(self.sources.get('GOES',c.goes+'/v1/spaceweather'),now)
         if cmd=='adsb':
-            location,error=request_location(payload,contacts)
-            return error or aircraft(self.sources.get('ADSB',c.adsb,ttl=3),c,now,location)
+            location,error=(None,None) if args else request_location(payload,contacts)
+            return error or aircraft(self.sources.get('ADSB',c.adsb,ttl=3),c,now,location,' '.join(args) if args else None)
         if cmd=='ais':
-            location,error=request_location(payload,contacts)
-            return error or vessels(self.sources.get('AIS',c.ais,ttl=0),c,now,location)
+            location,error=(None,None) if args else request_location(payload,contacts)
+            return error or vessels(self.sources.get('AIS',c.ais,ttl=0),c,now,location,' '.join(args) if args else None)
         if cmd=='status':
             discussion='unavailable'
             try:

@@ -247,7 +247,7 @@ class Runner:
                         self.worker_health[conversation]={'state':'executing','since':time.monotonic()}
                         try:
                             contacts=contact_snapshot(mc)
-                            if conversation[0]=='dm' and cmd in ('wx','sat','adsb','ais') and not (cmd=='wx' and args):
+                            if conversation[0]=='dm' and (cmd=='sat' or cmd in ('wx','adsb','ais') and not args):
                                 contacts=await self.current_dm_contacts(mc,conversation[1])
                             text=await self.execute(engine,cmd,args,payload,contacts)
                         except ContactRefreshError as error:
