@@ -94,6 +94,21 @@ class Tests(unittest.TestCase):
         contacts={'aabb'+'00'*30:{'adv_name':'Greenleaf','type':2},'ccdd'+'00'*30:{'adv_name':'One','type':2},'ccdd'+'11'*30:{'adv_name':'Two','type':2}}
         text=path_reply([],{'path':'aabbccdd','path_len':2,'path_hash_mode':1},contacts)
         self.assertIn('Greenleaf/aabb',text);self.assertIn('ambiguous/ccdd',text)
+    def test_stale_repeaters_are_excluded_from_path_and_location(self):
+        payload = {'path':'aabb', 'path_len':1, 'path_hash_mode':1, 'route_type':1}
+        contacts = {
+            'aabb'+'00'*30: {'adv_name':'Recent', 'type':2, 'last_advert':NOW-60,
+                             'adv_lat':43.96476, 'adv_lon':-83.10631},
+            'aabb'+'11'*30: {'adv_name':'Old', 'type':2, 'last_advert':NOW-48*3600},
+        }
+        self.assertIn('Recent/aabb', path_reply([], payload, contacts, now=NOW))
+        location, error = request_location(payload, contacts, now=NOW)
+        self.assertIsNone(error)
+        self.assertEqual(location['name'], 'Recent')
+
+        self.assertIn('?/aabb', path_reply([], payload, contacts, now=NOW+48*3600))
+        self.assertIsNone(request_location(payload, contacts, now=NOW+48*3600)[0])
+
     def test_path_explicit_and_missing(self):
         decoded=path_reply(['aabbccdd'],{},{})
         self.assertIn('❶ ?/aabb',decoded);self.assertIn('❷ ?/ccdd',decoded)

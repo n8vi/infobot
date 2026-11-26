@@ -405,7 +405,7 @@ def _pinnebog_location(contacts):
     return {'lat': lat, 'lon': lon, 'name': name, 'county': county, 'county_boundary': on_boundary}
 
 
-def dm_location(sender,contacts):
+def dm_location(sender,contacts,now=None):
     """Estimate DM origin from the sender end of the learned OUTBOUND route.
 
     The companion does not expose a DM's received hop hashes. Its stored path
@@ -426,14 +426,14 @@ def dm_location(sender,contacts):
     width=2*(mode+1)
     if not isinstance(raw,str) or len(raw)!=count*width or not re.fullmatch(r'[0-9a-fA-F]+',raw):
         return None, 'Location unavailable: DM sender return route is malformed.'
-    location,error=_repeater_location(raw[-width:].lower(),contacts,'DM sender-side')
+    location,error=_repeater_location(raw[-width:].lower(),contacts,'DM sender-side',now=now)
     if location is not None: location['basis']='dm_return_route'
     return location,error
 
 
-def request_location(payload, contacts):
+def request_location(payload, contacts, now=None):
     if payload.get('_dm_sender'):
-        return dm_location(payload['_dm_sender'],contacts)
+        return dm_location(payload['_dm_sender'],contacts,now=now)
     route_kind = _route_kind(payload)
     if route_kind == 'direct':
         return _pinnebog_location(contacts), None
@@ -454,11 +454,13 @@ def request_location(payload, contacts):
     if not isinstance(raw, str) or not re.fullmatch(r'[0-9a-fA-F]+', raw) or len(raw) < width:
         return None, 'Location unavailable: the received path is malformed.'
     hop = raw[:width].lower()
-    return _repeater_location(hop,contacts)
+    return _repeater_location(hop,contacts,now=now)
 
 
-def _repeater_location(hop,contacts,label='hop-1'):
-    matches = []
+REPEATER_MAX_AGE = 48 * 60 * 60
+
+
+def _matching_repeaters(hop, contacts, now):
     for key, contact in contacts.items():
         if not isinstance(key, str) or not isinstance(contact, dict) or not key.lower().startswith(hop):
             continue
@@ -466,11 +468,19 @@ def _repeater_location(hop,contacts,label='hop-1'):
             kind = int(contact.get('type', contact.get('adv_type', -1)))
         except (ValueError, TypeError):
             continue
-        if kind in (2, 3):
-            matches.append((key, contact))
+        if kind not in (2, 3):
+            continue
+        last_advert = number(contact.get('last_advert'), 0)
+        if 0 < last_advert <= now - REPEATER_MAX_AGE:
+            continue
+        yield contact
+
+
+def _repeater_location(hop,contacts,label='hop-1',now=None):
+    matches = list(_matching_repeaters(hop, contacts, time.time() if now is None else now))
     if len(matches) != 1:
         return None, f'Location unavailable: {label} repeater is missing or ambiguous in local contacts.'
-    _, contact = matches[0]
+    contact = matches[0]
     coords = _coordinates(contact)
     if coords is None:
         return None, f'Location unavailable: {label} repeater has no advertised coordinates.'
@@ -745,7 +755,8 @@ def ping_host(args):
     return summary + '.'
 
 
-def path_reply(args, payload, contacts):
+def path_reply(args, payload, contacts, now=None):
+    now = time.time() if now is None else now
     if args:
         joined = ' '.join(args).lower()
         tokens = re.split(r'[\s,>:-]+', joined)
@@ -771,7 +782,7 @@ def path_reply(args, payload, contacts):
         hops = [raw[i:i+width].lower() for i in range(0,len(raw),width)]
     named=[]
     for index, hop in enumerate(hops, 1):
-        matches = [clean(c.get('adv_name') or hop) for key,c in contacts.items() if key.lower().startswith(hop) and c.get('type') in (2,3)]
+        matches = [clean(c.get('adv_name') or hop) for c in _matching_repeaters(hop, contacts, now)]
         label = matches[0] if len(matches)==1 else ('ambiguous' if matches else '?')
         if len(matches)==1:
             label = re.sub(r'thumbmesh\.com', '', label, flags=re.IGNORECASE).rstrip('- ')
@@ -995,11 +1006,11 @@ class Engine:
                 pages[-1] = pages[-1].encode()[:c.byte_limit - 28].decode('utf-8', 'ignore').rstrip() + '…'
             return '\n'.join(pages)
         if cmd=='sat':
-            location,error=request_location(payload,contacts)
+            location,error=request_location(payload,contacts,now=now)
             return error or self.satellites.report(args,now,location)
         if cmd=='ping':return ping_host(args) if args else 'Pong!'
         if cmd=='help':return HELP_DETAIL.get(ALIASES.get(args[0].lower(),args[0].lower()),HELP) if args else HELP
-        if cmd=='path':return path_reply(args,payload,contacts)
+        if cmd=='path':return path_reply(args,payload,contacts,now=now)
         if cmd=='hashsize':return packet_info_reply(payload,c.region_names)
         if cmd=='wx':
             url = c.goes+'/v1/weather'
@@ -1010,7 +1021,7 @@ class Engine:
                 county = re.sub(r'[^a-z0-9]', '', place.lower()).removesuffix('county')
                 data = self.sources.get('GOES', url + '?' + urlencode({'place': place}), ttl=0)
                 return weather(data, county, now, None)
-            location,error=request_location(payload,contacts)
+            location,error=request_location(payload,contacts,now=now)
             if error:return error
             text=weather(self.sources.get('GOES',url),None,now,location)
             if location and location.get('basis')=='dm_return_route':
@@ -1018,10 +1029,10 @@ class Engine:
             return text
         if cmd=='aurora':return spaceweather(self.sources.get('GOES',c.goes+'/v1/spaceweather'),now)
         if cmd=='adsb':
-            location,error=(None,None) if args else request_location(payload,contacts)
+            location,error=(None,None) if args else request_location(payload,contacts,now=now)
             return error or aircraft(self.sources.get('ADSB',c.adsb,ttl=3),c,now,location,' '.join(args) if args else None)
         if cmd=='ais':
-            location,error=(None,None) if args else request_location(payload,contacts)
+            location,error=(None,None) if args else request_location(payload,contacts,now=now)
             return error or vessels(self.sources.get('AIS',c.ais,ttl=0),c,now,location,' '.join(args) if args else None)
         if cmd=='status':
             discussion='unavailable'
