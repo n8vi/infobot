@@ -14,7 +14,7 @@ from pathlib import Path
 import signal
 import time
 
-from core import VERSION, Config, Engine, State, parse_command, clean, local_addresses, number, packet_metadata_from_raw, validate_source
+from core import VERSION, Config, Engine, State, parse_command, clean, local_addresses, number, packet_metadata_from_raw, validate_source, _region_label
 from command_worker import execute_bounded
 from delivery import SerializedCommands, Transmitter
 
@@ -86,9 +86,7 @@ async def prepare(mc, setup=False, inspect=False, config=None):
             if not good(await mc.commands.set_name(NAME),EventType.OK):raise RuntimeError('Radio rename failed')
         if info.get('path_hash_mode')!=1:
             if not good(await mc.commands.set_path_hash_mode(1),EventType.OK):raise RuntimeError('Two-byte path mode unsupported/failed; update companion firmware')
-        if not good(await mc.commands.set_default_flood_scope('mi'),EventType.OK):
-            raise RuntimeError('Setting region mi failed; check companion firmware')
-        logging.info('Configured name infobot, channels %s, 2-byte paths, default region mi. No chat message sent.',config.channels)
+        logging.info('Configured name infobot, channels %s and 2-byte paths. No chat message sent.',config.channels)
         return select_channel(channels,config.channels[0][0])
     if str(mc.self_info.get('name', '')).strip().casefold()!=NAME.casefold():
         raise RuntimeError(f'Radio name {mc.self_info.get("name")!r} is not infobot. Run --setup-radio first')
@@ -267,7 +265,7 @@ class Runner:
                 for index,part in enumerate(parts):
                     if dead.is_set(): return
                     if conversation[0]=='channel':
-                        await transmitter.channel(conversation[1],part)
+                        await transmitter.channel(conversation[1],part,payload.get('_reply_region'))
                     elif not await transmitter.dm(conversation[1],part):
                         # The cursor already advanced for this batch. Preserve
                         # the failed packet and remaining batch for the next more.
@@ -375,6 +373,11 @@ class Runner:
                         if reason!='message from infobot itself':
                             logging.info('DROP channel #%s message: %s; text=%r',slot,reason,payload.get('text'))
                         return
+                    region = _region_label(payload, self.config.region_names) if payload.get('_rxlog_matched') else 'tag unavailable'
+                    if region != 'unscoped' and region not in self.config.region_names:
+                        logging.warning('DROP channel #%s request: cannot determine reply scope (%s)',slot,region)
+                        return
+                    payload['_reply_region'] = None if region == 'unscoped' else region
                     sender,(cmd,args)=parsed
                     conversation=('channel',slot)
                 else:
