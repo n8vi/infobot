@@ -865,12 +865,18 @@ def _region_label(payload, candidates):
     packet_bytes = _packet_bytes(raw_payload)
     if isinstance(payload_type, int) and 0 <= payload_type <= 255 and packet_bytes:
         message = bytes((payload_type,)) + packet_bytes
+        matches = set()
         for name in candidates:
             region_name = name.strip().lstrip('#')
             if not region_name: continue
             key = hashlib.sha256(('#'+region_name).encode()).digest()[:16]
             actual = int.from_bytes(hmac.new(key, message, hashlib.sha256).digest()[:2], 'little')
-            if actual == code: return region_name
+            # Firmware reserves zero and 0xffff and shifts those HMAC values inward.
+            if actual == 0: actual = 1
+            elif actual == 0xffff: actual = 0xfffe
+            if actual == code: matches.add(region_name)
+        if len(matches) == 1: return matches.pop()
+        if matches: return 'ambiguous region tag'
     return f'unknown (0x{code:04x})'
 
 

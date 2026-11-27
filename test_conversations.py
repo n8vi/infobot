@@ -39,7 +39,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             if cmd=='second':second.set()
             return cmd
         self.runner.execute=execute
-        async def channel(slot,text):sent.append((slot,text));return True
+        async def channel(slot,text,region):sent.append((slot,text));return True
         tx=SimpleNamespace(channel=channel)
         a=self.start(('channel',1),tx);b=self.start(('channel',2),tx)
         self.enqueue(a,'A','slow');self.enqueue(a,'A','second')
@@ -73,13 +73,13 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         tx = SimpleNamespace(channel=AsyncMock())
         queue = self.start(('channel', 1), tx)
         sender = '["channel",1,"Brad"]'
-        self.enqueue(queue, sender, 'ping', {'_received_at': 1000, 'sender_timestamp': 1121})
-        self.enqueue(queue, sender, 'ping', {'_received_at': 1001, 'sender_timestamp': 1122})
+        self.enqueue(queue, sender, 'ping', {'_received_at': 1000, 'sender_timestamp': 1121, '_reply_region': '#thumb'})
+        self.enqueue(queue, sender, 'ping', {'_received_at': 1001, 'sender_timestamp': 1122, '_reply_region': '#thumb'})
         await asyncio.wait_for(queue.join(), 1)
         self.assertEqual([call.args for call in tx.channel.await_args_list], [
-            (1, 'Pong!'),
-            (1, 'Brad: Clock warning: Your clock appears 121s ahead.'),
-            (1, 'Pong!'),
+            (1, 'Pong!', '#thumb'),
+            (1, 'Brad: Clock warning: Your clock appears 121s ahead.', '#thumb'),
+            (1, 'Pong!', '#thumb'),
         ])
         self.assertEqual(self.runner.state.repeat_page(sender, 1, time.time()), 'Pong!')
 

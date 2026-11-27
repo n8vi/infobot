@@ -42,9 +42,9 @@ docker compose logs -f --tail=50
 ```
 
 Setup creates configured hashtag channels in empty non-Public slots, names
-the companion `infobot`, selects two-byte path hashes, and sets flood scope
-`mi`. It refuses duplicate channels and nonstandard hashtag keys. It leaves
-RF settings and existing channel keys unchanged. Normal startup validates
+the companion `infobot` and selects two-byte path hashes. It refuses duplicate
+channels and nonstandard hashtag keys. It leaves RF settings and existing
+channel keys unchanged. Normal startup validates
 settings rather than rewriting them. Channel count is limited by companion
 slots. DM delivery may reset an individual contact route to flood after missed
 receipts; it does not clear the contact list.
@@ -99,8 +99,17 @@ logged, without claiming every client received the advert.
 
 ## Private delivery and radio pacing
 
-Channel replies are sent once, without delivery confirmation. `TX_GAP`
-(default six seconds) is the minimum gap between **channel** transmissions.
+Channel replies are sent once, without delivery confirmation. Each reply uses
+the requesting packet's flood region, including unscoped requests. Add the
+auto-hashtag names you use to `REGION_NAMES` (comma-separated, default `mi`).
+The bot needs a matching radio RX log to identify the region. If the log is
+missing or its tag cannot be resolved, it logs the request and skips the reply.
+The scope override lasts for one transmission. Unscoped replies require
+companion protocol v12 or newer. Discovery adverts and flooded DMs use the
+companion's default scope. Private receive events do not provide enough
+information to match an incoming DM to its raw packet and region.
+
+`TX_GAP` (default six seconds) is the minimum gap between **channel** transmissions.
 DMs are exempt from that artificial gap: the next DM packet is eligible as
 soon as the destination acknowledges the previous one. All companion command/
 response pairs are serialized, including background message fetching.

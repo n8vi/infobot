@@ -76,6 +76,8 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             return Event(EventType.MSG_SENT,{'expected_ack':b'abcd','suggested_timeout':1})
         mc.commands.send_msg=send
         mc.commands.send_chan_msg=AsyncMock(return_value=Event(EventType.OK,{}))
+        mc.commands.force_unscoped=AsyncMock(return_value=Event(EventType.OK,{}))
+        mc.commands.set_flood_scope=AsyncMock(return_value=Event(EventType.OK,{}))
         task=asyncio.create_task(tx.dm(KEY,'page'))
         await waiting.wait()
         self.assertTrue(await asyncio.wait_for(tx.channel(1,'channel reply'),.1))
@@ -86,15 +88,21 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_gap_does_not_hold_transmitter_lock(self):
         mc,d,tx=await self.radio(Config(dm_ack_timeout=.1,gap=.15))
         mc.commands.send_chan_msg=AsyncMock(return_value=Event(EventType.OK,{}))
+        mc.commands.force_unscoped=AsyncMock(return_value=Event(EventType.OK,{}))
+        mc.commands.set_flood_scope=AsyncMock(return_value=Event(EventType.OK,{}))
         async def send(*args,**kwargs):
             await self.ack(d,b'abcd'.hex())
             return Event(EventType.MSG_SENT,{'expected_ack':b'abcd','suggested_timeout':1})
         mc.commands.send_msg=send
-        await tx.channel(1,'first')
+        await tx.channel(1,'first','thumb')
+        self.assertEqual([call.args for call in mc.commands.set_flood_scope.await_args_list],
+                         [('thumb',), (None,)])
+        mc.commands.force_unscoped.assert_not_awaited()
         second=asyncio.create_task(tx.channel(1,'second'))
         self.assertTrue(await asyncio.wait_for(tx.dm(KEY,'private'),.1))
         self.assertFalse(second.done())
         await second
+        mc.commands.force_unscoped.assert_awaited_once_with()
 
     async def test_previous_message_receipt_cannot_ack_next_message(self):
         mc,d,tx=await self.radio(Config(dm_ack_timeout=.001,dm_retries=0))
