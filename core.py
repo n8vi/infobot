@@ -26,10 +26,10 @@ DTX_COUNTIES = {slug: (entry['name'], *entry['center']) for slug, entry in COUNT
 CIRCLED_HOP_NUMBERS = '❶❷❸❹❺❻❼❽❾❿⓫⓬⓭⓮⓯⓰⓱⓲⓳⓴㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚㉛㉜㉝㉞㉟㊱㊲㊳㊴㊵㊶㊷㊸㊹㊺㊻㊼㊽㊾㊿'
 ALIASES = {'planes': 'adsb', 'boats': 'ais', 'spacewx': 'aurora', 'decode': 'path', 'route': 'path', 'p': 'path',
            'region': 'hashsize'}
-COMMANDS = {'help', 'about', 'ping', 'path', 'wx', 'aurora', 'adsb', 'ais', 'status', 'more', 'repeat', 'hashsize', 'internet', 'get', 'sat'}
+COMMANDS = {'help', 'about', 'ping', 'path', 'wx', 'aurora', 'adsb', 'ais', 'status', 'more', 'repeat', 'hashsize', 'internet', 'get', 'sat', 'clock'}
 HELP = ('Commands: ping [host]; path [hex]; wx [county/ZIP]; aurora/spacewx; '
         'adsb/planes; ais/boats; hashsize/region; internet; get <URL>; sat [ID|name[,name...]]; '
-        'bot, <question>; status; more; repeat <page>; about. Prefix ! optional. help <command> for details.')
+        'bot, <question>; status; clock; more; repeat <page>; about. Prefix ! optional. help <command> for details.')
 HELP_DETAIL = {
  'wx': 'wx <Michigan county> or wx <5-digit US ZIP> finds local GOES forecasts. Bare wx uses your estimated location in the Detroit/Pontiac area or within 50 mi.',
  'path': 'path: repeaters on this message route. path aabb,ccdd: decode supplied hashes. Bare hex defaults to 2-byte hops. Unknown/colliding hashes are marked.',
@@ -38,6 +38,7 @@ HELP_DETAIL = {
  'adsb': 'adsb <registration|ICAO address|flight ID> searches the local feed. Bare adsb lists nearby aircraft.',
  'ais': 'ais <MMSI|IMO|vessel name|radio call sign> searches the local feed. Bare ais lists nearby vessels.',
  'ping': 'ping: no argument replies Pong! ping <IPv4|IPv6|hostname> sends 3 ICMP probes and reports loss/latency.', 'status': 'status: uptime and last data-source request results; GOES discussion freshness.',
+ 'clock': 'clock: current Eastern and UTC time and your apparent clock offset.',
  'about': 'about: version and operating notes for infobot.',
  'more': 'more: next page of your last long reply. Expires after 10 min. Channel names are not authenticated identities.',
  'repeat': 'repeat <page>: resend a page from the last reply without advancing the more cursor.',
@@ -982,6 +983,24 @@ class State:
         return last_sent[page_number-1]
 
 
+def clock_offset(payload):
+    received = number(payload.get('_received_at'))
+    sent = number(payload.get('sender_timestamp'))
+    if received is None or sent is None:
+        return None
+    return number(received - sent)
+
+
+def describe_clock_offset(offset):
+    if offset is None:
+        return 'Your clock offset is unavailable.'
+    seconds = round(abs(offset))
+    if not seconds:
+        return 'Your clock appears in sync.'
+    direction = 'behind' if offset > 0 else 'ahead'
+    return f'Your clock appears {seconds:,}s {direction}.'
+
+
 class Engine:
     def __init__(self,config,sources=None):
         self.config=config;self.sources=sources or Sources();self.started=time.time();self.satellites=SatellitePasses(config)
@@ -989,6 +1008,12 @@ class Engine:
         now=now or time.time();payload=payload or {};contacts=contacts or {}
         c=self.config
         if cmd=='about':return f'Infobot v{VERSION}\nThe homebrew bot at tarratt.net HQ.\nNetwork commands: internet, get, sat refresh, ping <target>, bot, <question>.'
+        if cmd=='clock':
+            if args:return 'Use clock with no arguments.'
+            utc = datetime.fromtimestamp(now, timezone.utc)
+            local = utc.astimezone(LOCAL)
+            offset = describe_clock_offset(clock_offset(payload))
+            return f'At the beep, the time will be {local:%H:%M %Z}/{utc:%H:%M} UTC.  Beep.  {offset}'
         if cmd=='internet':
             if args:return 'Use internet with no arguments.'
             return internet_status()

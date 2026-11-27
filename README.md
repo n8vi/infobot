@@ -151,6 +151,7 @@ A companion send error triggers reconnect rather than blind retries.
 | `bot, <question>` | Search the public web and return a short answer |
 | `get <HTTP(S) URL>` | Public fetched text, only if it fits one packet |
 | `status` | Uptime, GOES index health and conversation's source-request status |
+| `clock` | Current Eastern and UTC time and your apparent clock offset |
 | `more` | Next saved reply batch; on failed DM delivery resumes the failed packet |
 | `repeat N` | Resend packet N of the **latest batch**, without advancing `more` |
 
@@ -160,9 +161,12 @@ Saved text expires ten minutes after creation. Pagination and cooldowns are
 scoped to channel+sender or to the DM public key, so another conversation
 does not overwrite your response. A new content command replaces saved text.
 
-Packets older than 120 seconds or over 30 seconds in the future are ignored.
-Keep host and companion clocks synchronized. Duplicate fingerprints persist
-24 hours in the state volume; cooldowns and pagination are in memory.
+Commands can run regardless of the sender's clock. When the packet timestamp
+differs from the bot's receipt time by more than 120 seconds, the bot sends a
+warning after the reply, at most once per sender per conversation per hour.
+The estimate includes transit delay. Use `clock` to check it on demand.
+Duplicate fingerprints persist 24 hours in the state volume. Cooldowns,
+pagination and clock warning throttles are in memory.
 
 ## Locations and freshness
 
