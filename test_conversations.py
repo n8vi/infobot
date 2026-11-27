@@ -69,6 +69,28 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.enqueue(queue,'private-user','more');await asyncio.wait_for(queue.join(),1)
         self.assertTrue(len(sends)>4)
 
+    async def test_clock_warning_leaves_reply_available_for_repeat(self):
+        tx = SimpleNamespace(channel=AsyncMock())
+        queue = self.start(('channel', 1), tx)
+        sender = '["channel",1,"Brad"]'
+        self.enqueue(queue, sender, 'ping', {'_received_at': 1000, 'sender_timestamp': 1121, '_reply_region': '#thumb'})
+        self.enqueue(queue, sender, 'ping', {'_received_at': 1001, 'sender_timestamp': 1122, '_reply_region': '#thumb'})
+        await asyncio.wait_for(queue.join(), 1)
+        self.assertEqual([call.args for call in tx.channel.await_args_list], [
+            (1, 'Pong!', '#thumb'),
+            (1, 'Brad: Clock warning: Your clock appears 121s ahead.', '#thumb'),
+            (1, 'Pong!', '#thumb'),
+        ])
+        self.assertEqual(self.runner.state.repeat_page(sender, 1, time.time()), 'Pong!')
+
+    def test_clock_warning_threshold_and_hourly_limit(self):
+        within = {'_received_at': 1000, 'sender_timestamp': 880}
+        outside = {'_received_at': 1000, 'sender_timestamp': 879}
+        self.assertIsNone(self.runner.clock_warning('Brad', within, 100))
+        self.assertIn('121s behind', self.runner.clock_warning('Brad', outside, 100))
+        self.assertIsNone(self.runner.clock_warning('Brad', outside, 3699))
+        self.assertIn('121s behind', self.runner.clock_warning('Brad', outside, 3700))
+
     def test_dm_prefix_collision_is_rejected(self):
         prefix='ab'*6
         contacts={prefix+'11'*26:{},prefix+'22'*26:{}}

@@ -80,7 +80,8 @@ class RadioTest(unittest.IsolatedAsyncioTestCase):
                         await frame(b'\0')
                     elif cmd==3:
                         sent.append((body[2],body[7:].decode()))
-                        await frame(b'\0');completed.set()
+                        await frame(b'\0')
+                        if len(sent)==3:completed.set()
                     elif cmd==20:await frame(b'\x0c'+(4000).to_bytes(2,'little'))
                     else:await frame(b'\0')
             except (asyncio.IncompleteReadError,ConnectionError):pass
@@ -93,7 +94,10 @@ class RadioTest(unittest.IsolatedAsyncioTestCase):
             try:
                 await asyncio.wait_for(completed.wait(),12)
                 await asyncio.sleep(.3)
-                self.assertEqual(sent,[(1,'Pong!')])
+                self.assertEqual(len(sent),3)
+                self.assertEqual([slot for slot,_ in sent],[1,1,1])
+                self.assertEqual([text for _,text in sent if text=='Pong!'],['Pong!','Pong!'])
+                self.assertRegex(sent[1][1],r'^Old: Clock warning: Your clock appears [\d,]+s behind\.$')
                 self.assertEqual(adverts,[b'\x07\x01'])
                 self.assertTrue(any("from Brad: text='Brad: ping' command=ping args=[]" in line for line in logs.output))
                 self.assertTrue(any("TX accepted by radio on channel #1 (delivery unconfirmed): 'Pong!'" in line for line in logs.output))
@@ -163,7 +167,7 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
         pending=[('channel',1,'Brad: ping'),('channel',2,'Brad: ping'),
                  ('channel',2,'Brad: @[infobot] ping'),
                  ('channel',1,'Other: ping'),
-                 ('dm_old',keys[0],'ping'),('dm_unknown',bytes.fromhex('33'*32),'ping'),
+                 ('dm_unknown',bytes.fromhex('33'*32),'ping'),
                  ('dm',keys[0],'ordinary chat'),('dm',keys[0],'wx'),('dm',keys[1],'ping')]
         sent=[];reply_scopes={};resets=[];contact_queries=[];connections=[];completed=asyncio.Event()
         def check():
@@ -215,7 +219,7 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                                 await frame(channel_rx_log(channel_key,text,ts,region_key))
                                 await frame(bytes([17,20,0,0,target,65,0])+ts.to_bytes(4,'little')+text.encode())
                             else:
-                                await frame(bytes([16,20,0,0])+target[:6]+bytes([255,0])+(ts-121 if kind=='dm_old' else ts).to_bytes(4,'little')+text.encode())
+                                await frame(bytes([16,20,0,0])+target[:6]+bytes([255,0])+ts.to_bytes(4,'little')+text.encode())
                             await frame(b'\x83')
                         else:await frame(b'\x0a')
                     elif cmd==CommandType.SET_FLOOD_SCOPE.value:
@@ -278,7 +282,6 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(contact_queries,[keys[0]])
                 self.assertCountEqual(dm_senders,[key.hex() for key in keys])
                 self.assertTrue(any('RX DM event before admission' in line and "text='wx'" in line for line in logs.output))
-                self.assertTrue(any('DROP DM event: message is' in line for line in logs.output))
                 self.assertTrue(any('DROP DM event: sender is unknown' in line for line in logs.output))
                 self.assertTrue(any('DROP DM event: not a supported command' in line for line in logs.output))
                 self.assertTrue(any("text='Brad: @[infobot] ping'" in line for line in logs.output))

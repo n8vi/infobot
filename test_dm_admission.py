@@ -28,10 +28,6 @@ class DMAdmissionTests(unittest.TestCase):
         cases=[
             (None,self.contacts,'invalid event payload'),
             (dict(self.payload,txt_type=2),self.contacts,'unsupported DM message type'),
-            (dict(self.payload,sender_timestamp=None),self.contacts,'missing or invalid sender timestamp'),
-            (dict(self.payload,sender_timestamp='nan'),self.contacts,'missing or invalid sender timestamp'),
-            (dict(self.payload,sender_timestamp=NOW+31),self.contacts,'31.0s in the future'),
-            (dict(self.payload,sender_timestamp=NOW-121),self.contacts,'121.0s old'),
             (dict(self.payload,text=None),self.contacts,'missing or invalid text'),
             (dict(self.payload,text='🌞'*129),self.contacts,'512-byte limit'),
             (dict(self.payload,pubkey_prefix='bad'),self.contacts,'invalid sender public-key prefix'),
@@ -57,8 +53,8 @@ class DMAdmissionTests(unittest.TestCase):
         self.assertIn('RX DM event before admission',logs.output[0])
         self.assertIn('DMs disabled',logs.output[1])
 
-    def test_existing_time_boundaries_and_missing_type_default_are_preserved(self):
-        for timestamp in (NOW-120,NOW+30):
+    def test_clock_offset_does_not_prevent_dm_admission(self):
+        for timestamp in (NOW-127318,NOW+127318,None,'nan'):
             payload=dict(self.payload,sender_timestamp=timestamp)
             payload.pop('txt_type')
             with self.assertLogs(level='INFO'):

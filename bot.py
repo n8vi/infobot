@@ -14,7 +14,11 @@ from pathlib import Path
 import signal
 import time
 
-from core import VERSION, Config, Engine, State, parse_command, clean, local_addresses, number, packet_metadata_from_raw, validate_source, _region_label
+from core import (
+    VERSION, Config, Engine, State, _region_label, clean, clock_offset,
+    describe_clock_offset, local_addresses, number, packet_metadata_from_raw,
+    parse_command, validate_source,
+)
 from command_worker import execute_bounded
 from delivery import SerializedCommands, Transmitter
 
@@ -110,11 +114,6 @@ def inspect_admission(payload, channel, now, policy='bare'):
     if sender.casefold()==NAME:return None,'message from infobot itself'
     parsed=parse_command(message,policy)
     if parsed is None:return None,'not a supported command'
-    timestamp=number(payload.get('sender_timestamp'))
-    if timestamp is None:return None,'missing or invalid sender timestamp'
-    age=now-timestamp
-    if age < -30:return None,f'sender timestamp is {abs(age):.1f}s in the future'
-    if age > 120:return None,f'message is {age:.1f}s old (limit 120s)'
     return (clean(sender),parsed),None
 
 
@@ -129,6 +128,7 @@ class Runner:
         self.worker_health={}
         self.last_command_error=None
         self.pending_pages={}
+        self.clock_warnings={}
         self.execution_slots=asyncio.Semaphore(config.command_workers)
         self.retired_tasks=set()
         self.next_advert=0.0
@@ -190,7 +190,7 @@ class Runner:
         tmp.replace(self.health_path)
 
     async def execute(self,engine,cmd,args,payload,contacts):
-        if cmd in ('about','help','path','hashsize') or (cmd=='ping' and not args):
+        if cmd in ('about','help','path','hashsize','clock') or (cmd=='ping' and not args):
             return engine.execute(cmd,args,payload,contacts)
         return await execute_bounded(engine,cmd,args,payload,contacts,self.config.command_timeout,self.execution_slots)
 
@@ -218,6 +218,16 @@ class Runner:
         logging.info('DM route fetched from companion for %s: hops=%r hash_mode=%r path=%r',
                      key,record.get('out_path_len'),record.get('out_path_hash_mode'),record.get('out_path'))
         return snapshot
+
+    def clock_warning(self, sender, payload, now):
+        offset = clock_offset(payload)
+        if offset is None or abs(offset) <= 120:
+            return None
+        self.clock_warnings = {key: until for key, until in self.clock_warnings.items() if until > now}
+        if sender in self.clock_warnings:
+            return None
+        self.clock_warnings[sender] = now + 3600
+        return f'Clock warning: {describe_clock_offset(offset)}'
 
     async def worker(self,mc,conversation,queue,dead,transmitter):
         engine=Engine(self.config)
@@ -273,6 +283,18 @@ class Runner:
                         if cmd!='repeat': self.pending_pages[sender]=(expiry,parts[index:])
                         logging.warning('DM delivery unconfirmed in %s; response paused',conversation)
                         break
+                else:
+                    if cmd != 'clock' and not dead.is_set():
+                        warning = self.clock_warning(sender,payload,time.monotonic())
+                        if warning:
+                            if conversation[0]=='channel':
+                                # Use the same packet limit as ordinary responses.
+                                name = json.loads(sender)[2]
+                                if len(f'{name}: {warning}'.encode()) <= self.config.byte_limit:
+                                    warning = f'{name}: {warning}'
+                                await transmitter.channel(conversation[1],warning,payload.get('_reply_region'))
+                            else:
+                                await transmitter.dm(conversation[1],warning)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -304,9 +326,6 @@ class Runner:
         if not isinstance(payload,dict): return reject('invalid event payload (expected an object)')
         if not self.config.dm_enabled: return reject('DMs disabled by configuration')
         if payload.get('txt_type',0)!=0: return reject('unsupported DM message type (ordinary text required)')
-        if timestamp is None: return reject('missing or invalid sender timestamp')
-        if age < -30: return reject(f'sender timestamp is {abs(age):.1f}s in the future (limit 30s)')
-        if age > 120: return reject(f'message is {age:.1f}s old (limit 120s)')
         text=payload.get('text')
         if not isinstance(text,str): return reject('missing or invalid text')
         if len(text.encode())>512: return reject('message exceeds 512-byte limit')
@@ -418,6 +437,7 @@ class Runner:
                     logging.info('DROP request in %s from %s: %s (%.1fs remaining); text=%r',
                                  conversation,sender,reason,remaining,payload.get('text'))
                     return
+                payload['_received_at']=now
                 queue.put_nowait((scoped,cmd,args,payload,time.monotonic()))
                 self.queued+=1
                 logging.info('RX %s from %s: text=%r command=%s args=%r',

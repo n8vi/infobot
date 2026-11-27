@@ -37,6 +37,18 @@ class Tests(unittest.TestCase):
         self.assertNotIn('SHOULD NOT',text)
     def test_stale_weather(self):
         self.assertIn('unavailable',weather(WX,'huron',NOW+86400,LOCATION))
+    def test_clock_uses_seasonal_eastern_time_and_receipt_offset(self):
+        engine = Engine(Config())
+        winter = datetime(2026, 1, 1, 21, 37, tzinfo=timezone.utc).timestamp()
+        summer = datetime(2026, 7, 1, 20, 37, tzinfo=timezone.utc).timestamp()
+        payload = {'_received_at': winter-10, 'sender_timestamp': winter-10-127318}
+        self.assertEqual(engine.execute('clock', [], payload, now=winter),
+                         'At the beep, the time will be 16:37 EST/21:37 UTC.  Beep.  '
+                         'Your clock appears 127,318s behind.')
+        self.assertEqual(engine.execute('clock', [], now=summer),
+                         'At the beep, the time will be 16:37 EDT/20:37 UTC.  Beep.  '
+                         'Your clock offset is unavailable.')
+
     def test_future_weather(self):
         data=json.loads(json.dumps(WX));data['counties']['huron']['issued_at']='2026-11-08T08:56:00+00:00'
         self.assertIn('stale/unavailable',weather(data,'huron',NOW,LOCATION))
@@ -122,7 +134,10 @@ class Tests(unittest.TestCase):
     def test_admission_channel_sender_age(self):
         p={'channel_idx':2,'text':'Brad: ping','sender_timestamp':NOW}
         self.assertEqual(admitted(p,2,NOW),('Brad',('ping',[])))
-        self.assertIsNone(admitted(p,1,NOW));self.assertIsNone(admitted(p,2,NOW+121))
+        self.assertIsNone(admitted(p,1,NOW))
+        for timestamp in (NOW-127318,NOW+127318,None,'nan'):
+            self.assertEqual(admitted(dict(p,sender_timestamp=timestamp),2,NOW),
+                             ('Brad',('ping',[])))
         self.assertIsNone(admitted(dict(p,text='infobot: ping'),2,NOW))
         self.assertIsNone(admitted(dict(p,text='Brad: ordinary chat'),2,NOW))
     def test_state_dedupe_persistence_and_cooldown(self):
