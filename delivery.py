@@ -103,10 +103,23 @@ class Transmitter:
                     return result
             await asyncio.sleep(wait)
 
-    async def channel(self, slot, text):
+    async def channel(self, slot, text, region=None):
         from meshcore import EventType
+
+        async def send():
+            commands = self.mc.commands
+            try:
+                scope = await commands.force_unscoped() if region is None else await commands.set_flood_scope(region)
+                if not good(scope,EventType.OK):
+                    raise ConnectionError('Radio did not accept channel reply scope')
+                return await commands.send_chan_msg(slot,text)
+            finally:
+                # Restore the companion default before an advert or DM can send.
+                if not good(await commands.set_flood_scope(None),EventType.OK):
+                    raise ConnectionError('Radio did not restore default flood scope')
+
         async with self.channel_turn:
-            result = await self.transmit(lambda: self.mc.commands.send_chan_msg(slot,text), channel=True)
+            result = await self.transmit(send, channel=True)
         if not good(result,EventType.OK):
             logging.warning('TX channel #%s rejected by radio: %r',slot,text)
             raise ConnectionError('Radio did not accept channel reply; not retrying')

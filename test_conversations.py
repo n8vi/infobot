@@ -39,7 +39,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             if cmd=='second':second.set()
             return cmd
         self.runner.execute=execute
-        async def channel(slot,text):sent.append((slot,text));return True
+        async def channel(slot,text,region):sent.append((slot,text));return True
         tx=SimpleNamespace(channel=channel)
         a=self.start(('channel',1),tx);b=self.start(('channel',2),tx)
         self.enqueue(a,'A','slow');self.enqueue(a,'A','second')

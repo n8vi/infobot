@@ -16,6 +16,20 @@ except ImportError:HAS_LIBRARY=False
 from bot import Runner, EXPECTED_KEY
 from core import Config
 
+def channel_rx_log(channel_key, text, timestamp, region_key=None):
+    import hashlib
+    import hmac
+    from Crypto.Cipher import AES
+
+    plaintext=timestamp.to_bytes(4,'little')+b'\0'+text.encode()
+    encrypted=AES.new(channel_key,AES.MODE_ECB).encrypt(plaintext.ljust((len(plaintext)+15)//16*16,b'\0'))
+    packet=hashlib.sha256(channel_key).digest()[:1]+hmac.digest(channel_key,encrypted,'sha256')[:2]+encrypted
+    route=b'\x15'
+    if region_key is not None:
+        route=b'\x14'+hmac.digest(region_key,b'\x05'+packet,'sha256')[:2]+bytes(2)
+    return b'\x88\x00\xba'+route+b'\x41\xaa\xbb'+packet
+
+
 @unittest.skipUnless(HAS_LIBRARY,'install requirements.txt for TCP integration test')
 class RadioTest(unittest.IsolatedAsyncioTestCase):
     async def test_web_command_uses_bounded_worker(self):
@@ -47,7 +61,7 @@ class RadioTest(unittest.IsolatedAsyncioTestCase):
                     if cmd==1:
                         await frame(b'\x05'+bytes([1,20,22])+bytes(32)+bytes(8)+bytes(4)+bytes(8)+bytes([8,5])+b'infobot')
                     elif cmd==22:
-                        await frame(b'\x0d'+bytes([10,1,3])+bytes(4)+b'test'.ljust(12,b'\0')+b'emulator'.ljust(40,b'\0')+b'1.0'.ljust(20,b'\0')+bytes([0,1]))
+                        await frame(b'\x0d'+bytes([12,1,3])+bytes(4)+b'test'.ljust(12,b'\0')+b'emulator'.ljust(40,b'\0')+b'1.0'.ljust(20,b'\0')+bytes([0,1]))
                     elif cmd==31:
                         idx=body[1];name=['Public','#infobot',''][idx]
                         await frame(bytes([18,idx])+name.encode().ljust(32,b'\0')+(EXPECTED_KEY if idx==1 else bytes(16)))
@@ -56,7 +70,9 @@ class RadioTest(unittest.IsolatedAsyncioTestCase):
                     elif cmd==10:
                         if pending:
                             ch,text,timestamp=pending.pop(0)
-                            await frame(bytes([17,20,0,0,ch,64,0])+timestamp.to_bytes(4,'little')+text.encode())
+                            if ch==1:
+                                await frame(channel_rx_log(EXPECTED_KEY,text,timestamp))
+                            await frame(bytes([17,20,0,0,ch,65,0])+timestamp.to_bytes(4,'little')+text.encode())
                             await frame(b'\x83')
                         else:await frame(b'\x0a')
                     elif cmd==7:
@@ -118,7 +134,7 @@ class SetupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channels[1]['channel_name'],'#bots')
         commands.set_name.assert_awaited_once_with('infobot')
         commands.set_path_hash_mode.assert_awaited_once_with(1)
-        commands.set_default_flood_scope.assert_awaited_once_with('mi')
+        commands.set_default_flood_scope.assert_not_awaited()
 
     async def test_reconnect_after_failure(self):
         from unittest.mock import AsyncMock
@@ -140,14 +156,16 @@ class SetupTest(unittest.IsolatedAsyncioTestCase):
 class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
     async def test_channels_dms_receipts_and_flood_on_real_wire(self):
         import hashlib
+        from meshcore.commands.messaging import CommandType
         keys=[bytes.fromhex('11'*32),bytes.fromhex('22'*32)]
         ts=int(time.time())
         # All inputs arrive before the first DM receipt times out.
         pending=[('channel',1,'Brad: ping'),('channel',2,'Brad: ping'),
                  ('channel',2,'Brad: @[infobot] ping'),
+                 ('channel',1,'Other: ping'),
                  ('dm_old',keys[0],'ping'),('dm_unknown',bytes.fromhex('33'*32),'ping'),
                  ('dm',keys[0],'ordinary chat'),('dm',keys[0],'wx'),('dm',keys[1],'ping')]
-        sent=[];resets=[];contact_queries=[];connections=[];completed=asyncio.Event()
+        sent=[];reply_scopes={};resets=[];contact_queries=[];connections=[];completed=asyncio.Event()
         def check():
             channels=[x for x in sent if x[0]=='channel']
             a=[x for x in sent if x[0]=='dm' and x[1]==keys[0][:6]]
@@ -155,6 +173,7 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
             if len(channels)==2 and len(a)>=2 and b:completed.set()
         async def peer(reader,writer):
             connections.append(writer)
+            scope_override=None
             async def frame(body):
                 writer.write(b'>'+len(body).to_bytes(2,'little')+body);await writer.drain()
             try:
@@ -165,7 +184,7 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                     if cmd==1:
                         await frame(b'\x05'+bytes([1,20,22])+bytes(32)+bytes(8)+bytes(4)+bytes(8)+bytes([8,5])+b'infobot')
                     elif cmd==22:
-                        await frame(b'\x0d'+bytes([10,1,3])+bytes(4)+b'test'.ljust(12,b'\0')+b'emulator'.ljust(40,b'\0')+b'1.0'.ljust(20,b'\0')+bytes([0,1]))
+                        await frame(b'\x0d'+bytes([12,1,3])+bytes(4)+b'test'.ljust(12,b'\0')+b'emulator'.ljust(40,b'\0')+b'1.0'.ljust(20,b'\0')+bytes([0,1]))
                     elif cmd==31:
                         idx=body[1];name=['Public','#infobot','#other'][idx]
                         key=hashlib.sha256(name.encode()).digest()[:16] if idx else bytes(16)
@@ -187,12 +206,23 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
                         if pending:
                             kind,target,text=pending.pop(0)
                             if kind=='channel':
-                                await frame(bytes([17,20,0,0,target,64,0])+ts.to_bytes(4,'little')+text.encode())
+                                channel_name=['Public','#infobot','#other'][target]
+                                channel_key=hashlib.sha256(channel_name.encode()).digest()[:16]
+                                region_key=None
+                                if target==1:
+                                    region_name=b'#unknown' if text.startswith('Other:') else b'#thumb'
+                                    region_key=hashlib.sha256(region_name).digest()[:16]
+                                await frame(channel_rx_log(channel_key,text,ts,region_key))
+                                await frame(bytes([17,20,0,0,target,65,0])+ts.to_bytes(4,'little')+text.encode())
                             else:
                                 await frame(bytes([16,20,0,0])+target[:6]+bytes([255,0])+(ts-121 if kind=='dm_old' else ts).to_bytes(4,'little')+text.encode())
                             await frame(b'\x83')
                         else:await frame(b'\x0a')
+                    elif cmd==CommandType.SET_FLOOD_SCOPE.value:
+                        scope_override=body[1:]
+                        await frame(b'\0')
                     elif cmd==3:
+                        reply_scopes[body[2]]=scope_override
                         sent.append(('channel',body[2],body[7:].decode()))
                         await frame(b'\0');check()
                     elif cmd==2:
@@ -221,7 +251,7 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
         port=server.sockets[0].getsockname()[1]
         with tempfile.TemporaryDirectory() as d,patch.dict(os.environ,{'MESH_HOST':'127.0.0.1','MESH_PORT':str(port)}),self.assertLogs(level='INFO') as logs:
             runner=Runner(Config(state=d+'/s.db',gap=.01,channels=(('#infobot','bare'),('#other','mention')),
-                                 dm_ack_timeout=.5,dm_flood_after=1,dm_retries=2))
+                                 dm_ack_timeout=.5,dm_flood_after=1,dm_retries=2,region_names=('mi','thumb')))
             dm_senders=[]
             original_execute=runner.execute
             async def execute(engine,cmd,args,payload,contacts):
@@ -233,9 +263,14 @@ class MultiConversationRadioTest(unittest.IsolatedAsyncioTestCase):
             runner.execute=execute
             task=asyncio.create_task(runner.session())
             try:
-                await asyncio.wait_for(completed.wait(),15)
+                try:
+                    await asyncio.wait_for(completed.wait(),5)
+                except asyncio.TimeoutError:
+                    self.fail('\n'.join(logs.output))
                 await asyncio.sleep(.1)
                 self.assertCountEqual([x[1:] for x in sent if x[0]=='channel'],[(1,'Pong!'),(2,'Pong!')])
+                self.assertTrue(any('cannot determine reply scope (unknown ' in line for line in logs.output))
+                self.assertEqual(reply_scopes,{1:b'\0'+hashlib.sha256(b'#thumb').digest()[:16],2:b'\x01'})
                 a=[x for x in sent if x[0]=='dm' and x[1]==keys[0][:6]]
                 self.assertEqual([x[2] for x in a],[0,1])
                 self.assertEqual(a[0][4],a[1][4])
